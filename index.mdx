@@ -1,0 +1,91 @@
+---
+title: "Mosaic Reporting: Internal Radiology Reporting Platform"
+sidebarTitle: "Home"
+description: "Mosaic Reporting is the internal documentation hub for the Mosaic radiology reporting platform, covering frontend, backend, and deployment infrastructure."
+---
+
+Mosaic Reporting is an internal radiology reporting platform built to streamline the creation, review, and distribution of diagnostic imaging reports. This documentation covers the full technical stack — from the React-based frontend and its subsystems, to the backend services and APIs, to the infrastructure supporting every environment.
+
+<CardGroup cols={3}>
+  <Card title="Frontend" icon="browser" href="/frontend/introduction">
+    Explore the frontend application architecture, subsystems, and configuration.
+  </Card>
+  <Card title="Backend" icon="server" href="/backend/introduction">
+    Understand backend services, data integrations, and the internal API surface.
+  </Card>
+  <Card title="Deployments" icon="cloud" href="/deployments/introduction">
+    Review hosting infrastructure, CI/CD pipelines, and environment configuration.
+  </Card>
+</CardGroup>
+
+## What's Inside
+
+<CardGroup cols={2}>
+  <Card title="System Architecture" icon="diagram-project" href="/frontend/architecture">
+    High-level diagrams showing how frontend components interact with backend services.
+  </Card>
+  <Card title="Core Subsystems" icon="cubes" href="/frontend/auth">
+    Deep dives into authentication, the report editor, worklist, DICOM viewer, and templates.
+  </Card>
+  <Card title="Backend Services" icon="gears" href="/backend/auth-service">
+    Per-service documentation covering auth, reports, worklist, templates, and notifications.
+  </Card>
+  <Card title="API Reference" icon="code" href="/backend/api-overview">
+    Internal REST API endpoints for reports, worklist management, and authentication.
+  </Card>
+  <Card title="Data & Integrations" icon="database" href="/backend/database">
+    Database layer, DICOM integration, and HL7/FHIR interoperability details.
+  </Card>
+  <Card title="Infrastructure" icon="network-wired" href="/deployments/architecture">
+    Hosting, CDN, secrets management, monitoring, and environment topology.
+  </Card>
+</CardGroup>
+
+## Quick Navigation
+
+<Tabs>
+  <Tab title="Frontend">
+    | Section | Description |
+    |---|---|
+    | [Introduction](/frontend/introduction) | Frontend overview and tech stack |
+    | [Architecture](/frontend/architecture) | System architecture diagram |
+    | [Authentication](/frontend/auth) | Login flows and session handling |
+    | [Report Editor](/frontend/report-editor) | Rich-text structured report authoring |
+    | [Worklist](/frontend/worklist) | Study queue and assignment management |
+    | [DICOM Viewer](/frontend/viewer-integration) | Imaging viewer integration |
+    | [Templates](/frontend/templates) | Report template system |
+    | [State Management](/frontend/state-management) | Global state and data flow |
+    | [API Client](/frontend/api-client) | HTTP client and request handling |
+    | [Routing](/frontend/routing) | Page routing and navigation |
+  </Tab>
+  <Tab title="Backend">
+    | Section | Description |
+    |---|---|
+    | [Introduction](/backend/introduction) | Backend overview and service map |
+    | [Architecture](/backend/architecture) | Backend system architecture diagram |
+    | [Auth Service](/backend/auth-service) | Authentication and authorization service |
+    | [Report Service](/backend/report-service) | Report lifecycle management |
+    | [Worklist Service](/backend/worklist-service) | Study queue and scheduling |
+    | [Template Service](/backend/template-service) | Template CRUD and versioning |
+    | [Notification Service](/backend/notification-service) | Event-driven notifications |
+    | [Database](/backend/database) | Data persistence layer |
+    | [DICOM Integration](/backend/dicom-integration) | PACS and DICOM connectivity |
+    | [HL7/FHIR](/backend/hl7-fhir) | Healthcare interoperability |
+  </Tab>
+  <Tab title="Deployments">
+    | Section | Description |
+    |---|---|
+    | [Introduction](/deployments/introduction) | Deployment overview and strategy |
+    | [Architecture](/deployments/architecture) | Infrastructure architecture diagram |
+    | [Frontend Hosting](/deployments/frontend-hosting) | Static hosting and CDN setup |
+    | [Backend Hosting](/deployments/backend-hosting) | Container and compute platform |
+    | [Database Infra](/deployments/database-infra) | Managed database infrastructure |
+    | [Monitoring](/deployments/monitoring) | Observability and alerting |
+    | [Secrets & Config](/deployments/secrets-config) | Secrets management |
+    | [Environments](/deployments/environments) | Dev, staging, and production topology |
+  </Tab>
+</Tabs>
+
+<Note>
+  This is an internal documentation site for the Mosaic Reporting engineering team. For questions or corrections, reach out to the platform team.
+</Note>

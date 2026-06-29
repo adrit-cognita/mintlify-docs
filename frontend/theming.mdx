@@ -1,0 +1,232 @@
+---
+title: "Frontend UI Theming, Dark Mode, and Brand Configuration"
+sidebarTitle: "Theming"
+description: "How Mosaic Reporting implements brand color tokens in Tailwind CSS, light and dark mode theme switching, and Radix UI component styling."
+---
+
+Mosaic Reporting uses Tailwind CSS as its styling foundation, with all brand colors, spacing, and typography defined as design tokens in `tailwind.config.ts`. Custom UI components are built on Radix UI primitives and styled exclusively through Tailwind utility classes — no external CSS files, no inline styles.
+
+## Brand Color Palette
+
+The Mosaic brand uses three primary colors. All three are registered as named tokens in `tailwind.config.ts` so you can reference them as utility classes anywhere in the codebase.
+
+<CardGroup cols={3}>
+  <Card title="Mosaic Orange" icon="circle">
+    **Primary action color**
+
+    Used for primary buttons, active states, focus rings, and key highlights.
+
+    `#ef7025`
+
+    `bg-mosaic-orange` / `text-mosaic-orange`
+  </Card>
+  <Card title="Mosaic Teal" icon="circle">
+    **Supporting accent color**
+
+    Used for links, secondary badges, informational highlights, and data visualization.
+
+    `#4fa1ab`
+
+    `bg-mosaic-teal` / `text-mosaic-teal`
+  </Card>
+  <Card title="Mosaic Light" icon="circle">
+    **Background and surface tint**
+
+    Used for card backgrounds, form field fills, and soft hover states in light mode.
+
+    `#eec9bc`
+
+    `bg-mosaic-light` / `text-mosaic-light`
+  </Card>
+</CardGroup>
+
+## Tailwind Configuration
+
+Brand colors, fonts, and any overrides to the default Tailwind scale live in `tailwind.config.ts` at the root of the frontend package. The `extend` key merges your tokens into the default palette rather than replacing it, so all built-in Tailwind utilities remain available.
+
+```ts
+// tailwind.config.ts
+import type { Config } from 'tailwindcss';
+
+const config: Config = {
+  // Enable class-based dark mode (controlled by <html class="dark">)
+  darkMode: 'class',
+
+  content: [
+    './index.html',
+    './src/**/*.{ts,tsx}',
+  ],
+
+  theme: {
+    extend: {
+      colors: {
+        mosaic: {
+          orange: '#ef7025',
+          teal:   '#4fa1ab',
+          light:  '#eec9bc',
+        },
+      },
+
+      fontFamily: {
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+      },
+    },
+  },
+
+  plugins: [],
+};
+
+export default config;
+```
+
+### Using Theme Tokens in Components
+
+Reference brand colors with the generated utility classes, just like any other Tailwind color:
+
+```tsx
+// Primary action button using brand orange
+<button className="bg-mosaic-orange hover:bg-mosaic-orange/90 text-white font-semibold px-4 py-2 rounded-md">
+  Sign Report
+</button>
+
+// Teal link-style text
+<a className="text-mosaic-teal underline hover:text-mosaic-teal/80">
+  View Study
+</a>
+
+// Light surface background
+<div className="bg-mosaic-light dark:bg-zinc-800 rounded-lg p-4">
+  {/* card content */}
+</div>
+```
+
+Opacity modifiers (`/90`, `/80`) work on all brand tokens because Tailwind generates CSS custom properties for them automatically.
+
+<Note>
+  All color customization is done at the Tailwind config level. Do not use inline `style` attributes to set colors — inline styles bypass the design token system, break dark mode, and are harder to audit during design reviews.
+</Note>
+
+## Light and Dark Mode
+
+Mosaic supports both light and dark mode. The active theme is driven by the presence of the `dark` class on the root `<html>` element. You toggle it with `useUIStore.setTheme()`:
+
+```ts
+// stores/uiStore.ts (theme slice)
+type Theme = 'light' | 'dark' | 'system';
+
+setTheme: (theme: Theme) => {
+  set((state) => { state.theme = theme; });
+
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const applyDark = theme === 'dark' || (theme === 'system' && prefersDark);
+
+  document.documentElement.classList.toggle('dark', applyDark);
+},
+```
+
+When `theme` is `"system"`, the store reads `prefers-color-scheme` and applies the `dark` class accordingly. The selected preference is persisted to `localStorage` via the Zustand `persist` middleware so the correct theme is applied before the first render.
+
+### Writing Dark-Mode-Aware Components
+
+Prefix any utility class with `dark:` to apply it only when the `dark` class is active on `<html>`:
+
+```tsx
+<div className="bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 border border-zinc-200 dark:border-zinc-700 rounded-xl p-6">
+  <h2 className="text-mosaic-orange font-semibold text-lg">Findings</h2>
+  <p className="text-zinc-600 dark:text-zinc-400 mt-2">
+    No acute cardiopulmonary process identified.
+  </p>
+</div>
+```
+
+## Typography
+
+Mosaic uses two typefaces, both registered in `tailwind.config.ts`:
+
+| Family | Token | Usage |
+|---|---|---|
+| **Inter** | `font-sans` | All UI text — labels, headings, body copy, buttons |
+| **JetBrains Mono** | `font-mono` | Measurements, DICOM metadata values, code snippets, numeric fields |
+
+Both fonts are loaded via a self-hosted CSS `@font-face` declaration in `src/styles/fonts.css` so they are available offline and do not depend on an external CDN.
+
+```tsx
+// Measurement display using monospace font
+<span className="font-mono text-sm text-zinc-700 dark:text-zinc-300">
+  23.4 mm
+</span>
+```
+
+## Component Library
+
+All interactive UI components (`Button`, `Dialog`, `Select`, `Tooltip`, etc.) are built on [Radix UI](https://www.radix-ui.com/) primitives. Radix handles accessibility, keyboard navigation, and ARIA attributes; Tailwind applies all visual styling.
+
+### Anatomy of a Custom Component
+
+```tsx
+// src/components/ui/Button.tsx
+import { cva, type VariantProps } from 'class-variance-authority';
+import { forwardRef } from 'react';
+
+const buttonVariants = cva(
+  // Base classes applied to every variant
+  'inline-flex items-center justify-center rounded-md font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mosaic-orange disabled:pointer-events-none disabled:opacity-50',
+  {
+    variants: {
+      variant: {
+        primary:   'bg-mosaic-orange text-white hover:bg-mosaic-orange/90',
+        secondary: 'bg-mosaic-teal text-white hover:bg-mosaic-teal/90',
+        ghost:     'bg-transparent text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800',
+        danger:    'bg-red-600 text-white hover:bg-red-700',
+      },
+      size: {
+        sm: 'h-8 px-3 text-sm',
+        md: 'h-10 px-4 text-sm',
+        lg: 'h-12 px-6 text-base',
+      },
+    },
+    defaultVariants: {
+      variant: 'primary',
+      size: 'md',
+    },
+  }
+);
+
+interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {}
+
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, ...props }, ref) => (
+    <button
+      ref={ref}
+      className={buttonVariants({ variant, size, className })}
+      {...props}
+    />
+  )
+);
+```
+
+Use `class-variance-authority` (`cva`) for any component that has multiple visual variants. This keeps variant logic declarative and prevents long ternary chains in JSX.
+
+### Extending Components
+
+When you need to add a new variant to an existing component, add it to the `variants` object in the `cva` call — do not add one-off overrides with `className` at the call site:
+
+```ts
+// ✅ Add a new variant in the component definition
+variants: {
+  variant: {
+    ...existing,
+    outline: 'border border-mosaic-orange text-mosaic-orange hover:bg-mosaic-orange/10',
+  },
+},
+
+// ❌ Don't patch styles at the call site
+<Button className="border border-mosaic-orange text-mosaic-orange">…</Button>
+```
+
+<Warning>
+  Do not use inline `style` attributes for colors, spacing, or typography. If you find yourself needing a value not in the Tailwind theme, add it to `tailwind.config.ts` as a token first. This keeps the design system consistent and makes future rebrand operations a single-file change.
+</Warning>

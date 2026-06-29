@@ -1,0 +1,121 @@
+---
+title: "Worklist Service: Study Queue and Assignment Management"
+sidebarTitle: "Worklist Service"
+description: "How the Mosaic worklist service ingests PACS studies, manages the radiology reporting queue, and handles study filtering, assignment, and claim operations."
+---
+
+The worklist service manages the queue of radiology studies awaiting reporting. It acts as the bridge between your PACS infrastructure and the reporting workflow — ingesting arriving studies, exposing a filterable and sortable queue to radiologists, and coordinating study claim and assignment so that no two radiologists accidentally work on the same study at the same time.
+
+## Study Ingestion
+
+Studies enter the worklist through the **DICOM adapter**, which supports two ingestion methods:
+
+- **HL7 ORM messages** — The adapter subscribes to the HL7 broker (Mirth Connect by default). Incoming ORM^O01 messages are parsed and mapped to worklist study records.
+- **DIMSE C-FIND** — The adapter can also poll your PACS using a DICOM C-FIND SCU request against the Study Root query level, pulling new studies at a configurable interval (default: 60 seconds).
+
+After ingestion, a study record is written to the `worklist_studies` table with `status: pending`.
+
+## Study Record Schema
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `uuid` | Primary key |
+| `studyInstanceUID` | `varchar` | DICOM Study Instance UID (unique) |
+| `patientMrn` | `varchar` | Patient medical record number |
+| `patientName` | `varchar` | Patient name (DICOM PN format) |
+| `modality` | `varchar` | Imaging modality (e.g., `CT`, `MR`, `XR`) |
+| `studyDate` | `date` | Date the study was performed |
+| `bodyPart` | `varchar` | Body part examined (e.g., `CHEST`, `HEAD`) |
+| `priority` | `enum` | `STAT` or `routine` |
+| `status` | `enum` | `pending`, `in-progress`, or `complete` |
+| `assignedTo` | `uuid` | FK to the claiming radiologist user (nullable) |
+| `referringPhysician` | `varchar` | Name of the ordering/referring physician |
+
+## Querying the Worklist
+
+Use `GET /api/worklist` to retrieve the study queue. The endpoint supports rich filtering, sorting, and pagination through query parameters.
+
+### Query Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `status` | `string` | Filter by study status: `pending`, `in-progress`, `complete` |
+| `modality` | `string` | Filter by imaging modality (e.g., `CT`, `MR`) |
+| `priority` | `string` | Filter by priority: `STAT` or `routine` |
+| `assignedTo` | `uuid` | Filter by assigned radiologist user ID |
+| `dateFrom` | `date` | Include only studies on or after this date (ISO 8601) |
+| `dateTo` | `date` | Include only studies on or before this date (ISO 8601) |
+| `search` | `string` | Free-text search against `patientName` and `patientMrn` |
+| `sortBy` | `string` | Sort field: `studyDate`, `priority`, or `patientName` |
+| `sortOrder` | `string` | Sort direction: `asc` or `desc` (default: `desc`) |
+| `page` | `integer` | Page number (1-indexed, default: `1`) |
+| `pageSize` | `integer` | Results per page (default: `25`, max: `100`) |
+
+Example request:
+
+```http
+GET /api/worklist?status=pending&modality=CT&priority=STAT&sortBy=studyDate&sortOrder=asc&page=1&pageSize=25
+Authorization: Bearer <accessToken>
+```
+
+The response envelope includes `data` (array of study records), `total`, `page`, and `pageSize`.
+
+## Claiming a Study and Starting a Report
+
+<Steps>
+  <Step title="Browse the worklist">
+    You query `GET /api/worklist` with your desired filters to find studies awaiting reporting. STAT studies are displayed with a visual indicator and sorted to the top when `sortBy=priority` is used.
+  </Step>
+  <Step title="Claim the study">
+    Send `PATCH /api/worklist/:id/claim` with no request body. The service checks that the study is currently `pending` and not already claimed. If the study is free, it sets `status: in-progress` and `assignedTo` to your user ID in a single atomic operation using an optimistic lock.
+
+    ```json
+    // Response: updated study record
+    {
+      "id": "wl_01HX9QZ...",
+      "studyInstanceUID": "1.2.840.10008.5.1.4.1.1.2",
+      "status": "in-progress",
+      "assignedTo": "usr_01HX...",
+      ...
+    }
+    ```
+  </Step>
+  <Step title="Open the study in the viewer">
+    With the study claimed, your client uses the `studyInstanceUID` to launch the DICOM viewer (OHIF Viewer integration) so you can review the images alongside the report editor.
+  </Step>
+  <Step title="Create the report">
+    Call `POST /api/reports` with the `studyInstanceUID` and your chosen template. The report service creates a report in `draft` state linked to this worklist study.
+  </Step>
+  <Step title="Edit and finalize the report">
+    Use the report editor to fill in findings and impression fields, then submit the report through the `preliminary` → `final` state transitions via the report service. See the [Report Service](/backend/report-service) documentation for finalization details.
+  </Step>
+  <Step title="Study marked complete">
+    When the linked report reaches `final` status, the report service notifies the worklist service, which updates the study `status` to `complete`. The study is removed from the active queue.
+  </Step>
+</Steps>
+
+<Warning>
+  Only one user can hold a claim on a study at a time. If you attempt to claim a study that is already `in-progress`, the service returns `409 Conflict`. You must release your claim (via `PATCH /api/worklist/:id/release`) before another radiologist can claim it. Abandoned claims (no report activity for more than 2 hours) are automatically released by a scheduled cleanup job.
+</Warning>
+
+## STAT Study Handling
+
+When the DICOM adapter ingests a study with `priority: STAT`, the worklist service performs additional steps beyond writing the database record:
+
+1. The new study record is written with `priority: STAT` and `status: pending`.
+2. The service publishes a `study:stat_arrived` event to the notification service via an internal event bus.
+3. The notification service immediately pushes a WebSocket event to all clients subscribed to the `role:radiologist` room.
+4. An async BullMQ job is also enqueued to send email and SMS alerts to on-call radiologists based on their notification preferences.
+
+This ensures STAT studies receive immediate attention without relying on a radiologist to manually poll the worklist.
+
+## Releasing a Claim
+
+If you need to release a study you have claimed (for example, to reassign it to a colleague), call:
+
+```http
+PATCH /api/worklist/:id/release
+Authorization: Bearer <accessToken>
+```
+
+The service sets `status: pending` and clears `assignedTo`. Only the user who holds the current claim — or an `admin` — can release a claim.

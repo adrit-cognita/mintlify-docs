@@ -1,0 +1,131 @@
+---
+title: "CDN Configuration and Cache Control for Mosaic Frontend"
+sidebarTitle: "CDN Config"
+description: "CDN caching rules, cache-control headers, and invalidation strategy for Mosaic Reporting frontend assets to ensure fast load times and cache busting."
+---
+
+The Mosaic Reporting frontend is served entirely through a CDN — no web server process is involved at runtime. Getting cache-control headers right is therefore critical: too aggressive and users will be stuck on stale code after a deploy; too conservative and you lose the performance benefit of edge caching entirely. This page documents the exact `Cache-Control` policy for every asset type, the cache invalidation strategy, and the security headers applied at the CDN layer.
+
+## Cache-Control Policy by Asset Type
+
+| Asset Type | Pattern | Cache-Control Header | TTL | Rationale |
+|------------|---------|----------------------|-----|-----------|
+| HTML entry point | `/index.html` | `no-cache` | 0 (revalidate every request) | Ensures clients always check for a new deploy before loading stale JS bundles |
+| JS bundles | `/assets/*.js` | `public, max-age=31536000, immutable` | 1 year | Content-hashed filenames (e.g., `index-3f8a2c1d.js`) change on every build — safe to cache indefinitely |
+| CSS bundles | `/assets/*.css` | `public, max-age=31536000, immutable` | 1 year | Same content-hash guarantee as JS bundles |
+| Images | `/assets/images/*` | `public, max-age=86400` | 1 day | Images change infrequently; a 1-day TTL limits staleness without sacrificing much performance |
+| Favicon | `/favicon.svg` | `public, max-age=3600` | 1 hour | Short TTL avoids long-lived browser caches serving stale icons after a brand update |
+| Web manifest | `/manifest.json` | `public, max-age=3600` | 1 hour | PWA manifest rarely changes; 1-hour TTL is safe |
+| Fonts | `/assets/fonts/*` | `public, max-age=31536000, immutable` | 1 year | Font files are content-hashed and never mutate in place |
+
+## Cache Invalidation Strategy
+
+Mosaic Reporting uses a **content-hash cache-busting** approach for all assets except `index.html`.
+
+When Vite builds the application it produces filenames like `assets/index-3f8a2c1d.js`. The hash in the filename changes whenever the file content changes. This means:
+
+- Old asset files become unreachable by new clients (they reference new hashes in `index.html`) but remain in the CDN cache and are still served correctly to clients with the old `index.html` during a brief rollover window.
+- New clients always get the new assets because `index.html` was fetched fresh (its `no-cache` directive forces revalidation).
+- No manual CDN invalidation is needed for JS, CSS, or image assets.
+
+For **Vercel**, no invalidation API call is required — each deployment is promoted atomically. Old and new deployments coexist at separate internal URLs; the production alias is swapped after the build succeeds.
+
+For **AWS S3 + CloudFront**, you must invalidate `index.html` after every deployment:
+
+```bash
+aws cloudfront create-invalidation \
+  --distribution-id YOUR_DISTRIBUTION_ID \
+  --paths "/index.html"
+```
+
+You do not need to invalidate `/assets/*` — the content-hash filenames guarantee correctness.
+
+## Security Headers
+
+Security headers are applied globally at the CDN layer and do not require any backend involvement. Configure these headers in `vercel.json` or your CloudFront response headers policy.
+
+### Vercel `vercel.json` Headers Configuration
+
+```json
+{
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Strict-Transport-Security",
+          "value": "max-age=63072000; includeSubDomains; preload"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "SAMEORIGIN"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(), microphone=(), geolocation=()"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://api.mosaic.yourorg.com https://sentry.io; frame-ancestors 'self'"
+        }
+      ]
+    },
+    {
+      "source": "/index.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache" }
+      ]
+    },
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
+      "source": "/favicon.svg",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=3600" }
+      ]
+    },
+    {
+      "source": "/manifest.json",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=3600" }
+      ]
+    }
+  ]
+}
+```
+
+### Security Header Descriptions
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | Enforces HTTPS-only access for 2 years and allows HSTS preloading |
+| `X-Frame-Options` | `SAMEORIGIN` | Prevents the app from being embedded in `<iframe>` on third-party sites (clickjacking protection) |
+| `X-Content-Type-Options` | `nosniff` | Prevents browsers from MIME-sniffing a response away from the declared content type |
+| `Content-Security-Policy` | See above | Restricts which origins can load scripts, styles, images, and make network requests |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Limits referrer information sent on cross-origin requests |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` | Disables browser APIs that Mosaic Reporting does not use |
+
+## CORS Considerations
+
+The CDN serves only the frontend static files. Cross-Origin Resource Sharing (CORS) is configured on the **backend API**, not on the CDN. The frontend JavaScript running in the browser makes API calls to `https://api.mosaic.yourorg.com`, and the backend returns the appropriate `Access-Control-Allow-Origin` header. The CDN does not need to — and should not — add CORS headers to static asset responses.
+
+## Monitoring CDN Performance
+
+Track the following metrics to confirm the CDN configuration is working correctly:
+
+- **Cache hit ratio** — should be above 90% for `/assets/*` paths; if it is low, verify the `Cache-Control: immutable` header is being applied.
+- **`index.html` cache hit ratio** — should be 0% (always revalidated); a non-zero value suggests the `no-cache` rule is misconfigured.
+- **Time-to-First-Byte (TTFB)** — assets served from edge nodes should show TTFBs under 50 ms. High TTFBs on `/assets/*.js` indicate cache misses or origin pull latency.
+- **Core Web Vitals (LCP, CLS, FID)** — monitored via Sentry Performance or Vercel Analytics; a degraded LCP often points to a large un-split JS bundle or a cache miss on critical assets.

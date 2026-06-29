@@ -1,0 +1,166 @@
+---
+title: "Template Service: Managing Report Template Definitions"
+sidebarTitle: "Template Service"
+description: "The Mosaic Reporting template service stores, versions, and serves structured report template schemas that drive the report editor field layout."
+---
+
+The template service manages the JSON schema definitions that describe the structure and field layout of every report type in Mosaic Reporting. When a radiologist opens the report editor, the editor reads the assigned template from this service to know which sections to render, which fields to display, and which fields are required. Templates are modality- and body-part-specific, allowing you to tailor the reporting structure for chest CT, brain MRI, plain radiographs, and so on.
+
+## Template Schema
+
+Each template is stored as a row in the `report_templates` table with the following fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `uuid` | Primary key |
+| `name` | `varchar` | Human-readable template name (e.g., "CT Head Without Contrast") |
+| `description` | `text` | Optional description of the template's intended use |
+| `modality` | `varchar` | Target imaging modality (e.g., `CT`, `MR`, `XR`) |
+| `bodyPart` | `varchar` | Target body part (e.g., `HEAD`, `CHEST`, `ABDOMEN`) |
+| `version` | `integer` | Monotonically incrementing version number (starts at 1) |
+| `schema` | `jsonb` | Structured array of section and field definitions (see below) |
+| `isActive` | `boolean` | Whether the template is available for selection on new reports |
+| `createdBy` | `uuid` | FK to the admin user who created the template |
+| `createdAt` | `timestamptz` | Record creation timestamp |
+
+## Template `schema` Structure
+
+The `schema` field is a JSONB array of **section** objects. Each section groups related fields and is rendered as a collapsible panel in the report editor. Each **field** inside a section describes a single input control.
+
+**Section object:**
+
+| Property | Type | Description |
+|---|---|---|
+| `title` | `string` | Display heading for the section |
+| `order` | `integer` | Render order (ascending) |
+| `fields` | `array` | Ordered array of field definition objects |
+
+**Field object:**
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | `string` | Unique identifier within the template (used as the key in `report.body`) |
+| `label` | `string` | Display label shown to the user |
+| `type` | `string` | Input type: `text`, `textarea`, `select`, `radio`, `checkbox`, `number` |
+| `required` | `boolean` | Whether the field must be completed before transitioning to `preliminary` |
+| `defaultValue` | `any` | Pre-populated value when the report is created (optional) |
+| `options` | `array` | Array of `{ value, label }` objects for `select` and `radio` field types |
+
+## Example Template Schema
+
+The following example shows a minimal CT Head template with two sections:
+
+```json
+{
+  "id": "tmpl_01HX9QZABC",
+  "name": "CT Head Without Contrast",
+  "modality": "CT",
+  "bodyPart": "HEAD",
+  "version": 3,
+  "isActive": true,
+  "schema": [
+    {
+      "title": "Technique",
+      "order": 1,
+      "fields": [
+        {
+          "id": "field_technique",
+          "label": "Technique",
+          "type": "textarea",
+          "required": true,
+          "defaultValue": "Axial CT images of the brain were obtained without intravenous contrast.",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Findings",
+      "order": 2,
+      "fields": [
+        {
+          "id": "field_brain_parenchyma",
+          "label": "Brain Parenchyma",
+          "type": "textarea",
+          "required": true,
+          "defaultValue": "",
+          "options": []
+        },
+        {
+          "id": "field_ventricles",
+          "label": "Ventricles and Cisterns",
+          "type": "textarea",
+          "required": false,
+          "defaultValue": "Ventricles and cisterns are normal in size and configuration.",
+          "options": []
+        },
+        {
+          "id": "field_hemorrhage",
+          "label": "Hemorrhage",
+          "type": "select",
+          "required": true,
+          "defaultValue": "none",
+          "options": [
+            { "value": "none", "label": "No hemorrhage identified" },
+            { "value": "epidural", "label": "Epidural hemorrhage" },
+            { "value": "subdural", "label": "Subdural hemorrhage" },
+            { "value": "subarachnoid", "label": "Subarachnoid hemorrhage" },
+            { "value": "intraparenchymal", "label": "Intraparenchymal hemorrhage" }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Impression",
+      "order": 3,
+      "fields": [
+        {
+          "id": "field_impression",
+          "label": "Impression",
+          "type": "textarea",
+          "required": true,
+          "defaultValue": "",
+          "options": []
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Versioning
+
+Every `PUT /api/templates/:id` request increments the template's `version` integer. The previous version is not deleted — the service writes a snapshot of the old schema to the `template_versions` audit table before applying the update.
+
+<Note>
+  When a report is created, the report service **pins the current template version** by storing the `templateId` and `version` number on the report record. If you later update the template, existing reports continue to render using the version that was active when they were created. This ensures that finalized reports always look exactly as they did when signed — template updates never silently alter the layout of historical reports.
+</Note>
+
+## Endpoints
+
+| Method | Path | Access | Description |
+|---|---|---|---|
+| GET | `/api/templates` | All authenticated users | List all active templates (supports `?modality=` and `?bodyPart=` filters) |
+| POST | `/api/templates` | `admin` only | Create a new template at version 1 |
+| GET | `/api/templates/:id` | All authenticated users | Fetch a single template including its full schema |
+| PUT | `/api/templates/:id` | `admin` only | Update template definition; increments `version` |
+| DELETE | `/api/templates/:id` | `admin` only | Soft-delete (sets `isActive: false`); does not remove version history |
+| POST | `/api/templates/:id/clone` | `admin` only | Create a new template as a copy of an existing one at version 1 |
+
+## Access Control
+
+Only users with the `admin` role can create, update, delete, or clone templates. All other authenticated roles (`radiologist`, `resident`, `technologist`) can read the template list and individual template definitions — this is necessary for the report editor to load field configurations.
+
+Attempting to call a write endpoint with a non-admin token returns `403 Forbidden`.
+
+## Cloning a Template
+
+The clone endpoint (`POST /api/templates/:id/clone`) is useful when you want to create a variant of an existing template — for example, adapting a CT Head template for a CT Head with Contrast protocol. The cloned template is created at `version: 1` with a new `id` and `isActive: false` so you can edit it before making it available for new reports.
+
+```json
+// POST /api/templates/tmpl_01HX9QZABC/clone
+{
+  "name": "CT Head With Contrast"
+}
+```
+
+The response contains the full new template record, including its newly assigned `id`.

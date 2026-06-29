@@ -1,0 +1,166 @@
+---
+title: "Notification Service: Real-Time and Async Delivery"
+sidebarTitle: "Notification Service"
+description: "How Mosaic Reporting delivers real-time WebSocket notifications and async email/SMS alerts to radiologists for report status changes and STAT arrivals."
+---
+
+The notification service is responsible for keeping radiologists and clinical staff informed about events that require their attention. It operates across two delivery channels: a real-time WebSocket connection for in-app alerts, and an asynchronous queue for email and SMS messages. Both channels are driven by the same internal event bus — services publish events, and the notification service fans them out to the appropriate recipients through whichever channels each user has enabled.
+
+## Delivery Channels
+
+### Real-Time WebSocket
+
+Mosaic Reporting uses a **Socket.io** server for real-time in-app notifications. When your client connects, it authenticates the socket connection by passing the current JWT access token as a query parameter or in the `auth` handshake payload:
+
+```javascript
+// Client-side connection example
+import { io } from 'socket.io-client';
+
+const socket = io('https://api.mosaicreporting.internal', {
+  auth: {
+    token: accessToken, // JWT access token from auth service
+  },
+  transports: ['websocket'],
+});
+
+socket.on('connect', () => {
+  console.log('Connected to Mosaic notification service:', socket.id);
+});
+
+// Listen for report status changes
+socket.on('report:status_changed', (payload) => {
+  console.log('Report status updated:', payload);
+});
+
+// Listen for STAT study arrivals
+socket.on('study:stat_arrived', (payload) => {
+  console.log('STAT study arrived:', payload);
+});
+
+// Listen for PDF readiness
+socket.on('report:pdf_ready', (payload) => {
+  console.log('PDF ready:', payload.pdfUrl);
+});
+
+// Listen for study claim events
+socket.on('study:claimed', (payload) => {
+  console.log('Study claimed by:', payload.claimedBy);
+});
+
+socket.on('disconnect', (reason) => {
+  console.warn('Disconnected:', reason);
+});
+```
+
+The server validates the JWT on connection. If the token is missing, expired, or invalid, the handshake is rejected with a `401` error and the socket is disconnected. Tokens are not re-validated on every event — if you need to force re-authentication (e.g., after a role change), you must reconnect the socket with a fresh token.
+
+#### Socket Rooms
+
+Clients are automatically joined to two rooms on connection:
+
+| Room | Pattern | Purpose |
+|---|---|---|
+| User room | `user:<userId>` | Events targeted at a specific user (e.g., your own report's PDF is ready) |
+| Role room | `role:<roleName>` | Broadcast events for all users of a given role (e.g., all radiologists notified of a new STAT) |
+
+### Async Email and SMS
+
+Email and SMS notifications are delivered via **BullMQ** jobs, which are consumed by dedicated worker processes:
+
+- **Email** — Sent via **Nodemailer** using an SMTP transport. Configure the connection in the `SMTP_*` environment variables.
+- **SMS** — Sent via the **Twilio REST API**. Requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_FROM_NUMBER`.
+
+Jobs are enqueued with a configurable retry policy (default: 3 attempts with exponential backoff). Failed jobs are moved to the dead-letter queue (`notifications:failed`) after exhausting retries and can be inspected in the BullMQ dashboard.
+
+## WebSocket Events
+
+| Event | Emitted to | Trigger | Payload |
+|---|---|---|---|
+| `report:status_changed` | `user:<assignedTo>` | Report transitions to any new state | `{ reportId, studyInstanceUID, oldStatus, newStatus, changedBy, changedAt }` |
+| `study:stat_arrived` | `role:radiologist` | STAT study ingested into worklist | `{ studyId, studyInstanceUID, patientMrn, patientName, modality, bodyPart, arrivedAt }` |
+| `report:pdf_ready` | `user:<assignedTo>` | PDF generation job completes | `{ reportId, pdfUrl, generatedAt }` |
+| `study:claimed` | `role:radiologist` | Any radiologist claims a study | `{ studyId, studyInstanceUID, claimedBy, claimedAt }` |
+
+## STAT Study Notification Flow
+
+<Steps>
+  <Step title="Study ingested from PACS">
+    The DICOM adapter receives an HL7 ORM message or C-FIND result for a new study with `priority: STAT`. It writes the study record to the worklist and publishes a `study.stat_arrived` event to the internal event bus (Redis Pub/Sub).
+  </Step>
+  <Step title="Notification service receives the event">
+    The notification service is subscribed to the `study.stat_arrived` channel. It reads the event payload and determines which users and channels should be notified based on their saved notification preferences.
+  </Step>
+  <Step title="WebSocket push (real-time)">
+    The service emits a `study:stat_arrived` Socket.io event to the `role:radiologist` room. All connected radiologist clients receive the alert immediately, triggering an in-app toast notification and updating the worklist badge count.
+  </Step>
+  <Step title="Email job enqueued">
+    A BullMQ job is added to the `notifications:email` queue with the on-call radiologist's email address and a pre-rendered HTML template containing the study details. The email worker picks up the job and sends it via Nodemailer.
+  </Step>
+  <Step title="SMS job enqueued (if enabled)">
+    If the on-call radiologist has SMS notifications enabled for `study:stat_arrived`, a second BullMQ job is added to the `notifications:sms` queue. The SMS worker sends a concise message via the Twilio API: `"STAT [Modality] - [PatientMRN] arrived. Log in to Mosaic to claim."`.
+  </Step>
+  <Step title="Notification record persisted">
+    A `notifications` record is written to the database for each delivery attempt, capturing the `userId`, `type`, `channel`, and initial `status: pending`. The record is updated to `sent` or `failed` when the delivery worker resolves the job.
+  </Step>
+</Steps>
+
+## Notification Record Schema
+
+Each notification delivery attempt is logged in the `notifications` table:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `uuid` | Primary key |
+| `userId` | `uuid` | FK to the recipient user |
+| `type` | `varchar` | Event type (e.g., `report:status_changed`, `study:stat_arrived`) |
+| `payload` | `jsonb` | Full event payload at time of dispatch |
+| `channel` | `enum` | Delivery channel: `websocket`, `email`, or `sms` |
+| `status` | `enum` | Delivery status: `pending`, `sent`, or `failed` |
+| `createdAt` | `timestamptz` | Timestamp when the notification record was created |
+
+## User Notification Preferences
+
+Each user can configure which channels they want for each event type via the profile settings UI (backed by `PATCH /api/users/me/notification-preferences`). The preferences object looks like this:
+
+```json
+{
+  "report:status_changed": {
+    "websocket": true,
+    "email": true,
+    "sms": false
+  },
+  "study:stat_arrived": {
+    "websocket": true,
+    "email": true,
+    "sms": true
+  },
+  "report:pdf_ready": {
+    "websocket": true,
+    "email": false,
+    "sms": false
+  },
+  "study:claimed": {
+    "websocket": true,
+    "email": false,
+    "sms": false
+  }
+}
+```
+
+<Note>
+  The `websocket` channel cannot be disabled — in-app notifications are always delivered to connected clients regardless of preference settings. Only the `email` and `sms` channels are user-configurable.
+</Note>
+
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `SMTP_HOST` | SMTP server hostname |
+| `SMTP_PORT` | SMTP server port (typically `587` or `465`) |
+| `SMTP_USER` | SMTP authentication username |
+| `SMTP_PASS` | SMTP authentication password |
+| `SMTP_FROM` | Sender address (e.g., `noreply@mosaicreporting.internal`) |
+| `TWILIO_ACCOUNT_SID` | Twilio account SID |
+| `TWILIO_AUTH_TOKEN` | Twilio auth token |
+| `TWILIO_FROM_NUMBER` | Twilio source phone number (E.164 format) |
+| `REDIS_URL` | Redis URL used for BullMQ job queues and Pub/Sub |

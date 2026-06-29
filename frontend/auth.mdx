@@ -1,0 +1,221 @@
+---
+title: "Authentication Module: Login Flows and Session Handling"
+sidebarTitle: "Authentication"
+description: "How the Mosaic Reporting frontend handles user login, token storage, protected routes, and session expiry for radiologists and staff."
+---
+
+The Mosaic Reporting authentication module manages the full identity lifecycle for all users — radiologists, residents, technologists, and administrators. It covers login and logout flows, JWT token storage, silent token refresh, and role-based route protection throughout the application.
+
+## Overview
+
+The auth module is built around a React Context provider that exposes a `useAuth()` hook to any component in the tree. It coordinates with the backend over two token types:
+
+- **Access token** — short-lived JWT stored in memory (not `localStorage`), valid for **15 minutes**
+- **Refresh token** — longer-lived token stored in an **HttpOnly cookie**, valid for **7 days**
+
+Keeping the access token in memory and the refresh token in an HttpOnly cookie protects against XSS-based token theft while still enabling silent re-authentication.
+
+## Login Flow
+
+When a user submits their credentials, the frontend executes the following sequence:
+
+<Steps>
+  <Step title="Submit credentials">
+    The login form collects the user's email and password and calls `login()` from `useAuth()`.
+  </Step>
+  <Step title="POST to auth endpoint">
+    A `POST /api/auth/login` request is made with the credentials payload. The backend validates them and returns a JWT access token and sets a `Set-Cookie` header for the HttpOnly refresh token.
+  </Step>
+  <Step title="Store access token in memory">
+    The returned access token is stored in the React Context state — never written to `localStorage` or `sessionStorage`.
+  </Step>
+  <Step title="Decode user claims">
+    The access token payload is decoded (not verified — verification happens server-side) to extract `user.id`, `user.name`, `user.role`, and `user.email` for use across the app.
+  </Step>
+  <Step title="Redirect to worklist">
+    On successful login, the user is redirected to `/worklist`, the main landing view.
+  </Step>
+</Steps>
+
+## Auth Context and the `useAuth()` Hook
+
+All authentication state is provided through `<AuthProvider>`, which wraps the application at the root level. You access it via the `useAuth()` hook.
+
+The hook exposes:
+
+| Property | Type | Description |
+|---|---|---|
+| `user` | `User \| null` | Decoded user object from the access token |
+| `isAuthenticated` | `boolean` | `true` when a valid access token is present |
+| `login(credentials)` | `function` | Submits credentials and stores the returned token |
+| `logout()` | `function` | Clears the in-memory token and calls `POST /api/auth/logout` to invalidate the refresh token cookie |
+
+<Tabs>
+  <Tab title="Login Flow">
+    Use the `login()` function from `useAuth()` in your login form. It handles the API call, token storage, and any error state.
+
+    ```tsx
+    import { useAuth } from "@/context/AuthContext";
+    import { useNavigate } from "react-router-dom";
+
+    export function LoginPage() {
+      const { login, isAuthenticated } = useAuth();
+      const navigate = useNavigate();
+
+      async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+        e.preventDefault();
+        const form = new FormData(e.currentTarget);
+
+        try {
+          await login({
+            email: form.get("email") as string,
+            password: form.get("password") as string,
+          });
+          navigate("/worklist");
+        } catch (err) {
+          console.error("Login failed:", err);
+        }
+      }
+
+      return (
+        <form onSubmit={handleSubmit}>
+          <input name="email" type="email" placeholder="Email" required />
+          <input name="password" type="password" placeholder="Password" required />
+          <button type="submit">Sign In</button>
+        </form>
+      );
+    }
+    ```
+  </Tab>
+  <Tab title="Route Protection">
+    Wrap any route that requires authentication with `<ProtectedRoute>`. Unauthenticated users are redirected to `/login` automatically.
+
+    ```tsx
+    // src/components/ProtectedRoute.tsx
+    import { Navigate, Outlet } from "react-router-dom";
+    import { useAuth } from "@/context/AuthContext";
+
+    interface ProtectedRouteProps {
+      allowedRoles?: string[];
+    }
+
+    export function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
+      const { isAuthenticated, user } = useAuth();
+
+      if (!isAuthenticated) {
+        return <Navigate to="/login" replace />;
+      }
+
+      if (allowedRoles && user && !allowedRoles.includes(user.role)) {
+        return <Navigate to="/unauthorized" replace />;
+      }
+
+      return <Outlet />;
+    }
+    ```
+
+    Apply it in your router configuration:
+
+    ```tsx
+    // src/router.tsx
+    import { createBrowserRouter } from "react-router-dom";
+    import { ProtectedRoute } from "@/components/ProtectedRoute";
+
+    export const router = createBrowserRouter([
+      { path: "/login", element: <LoginPage /> },
+      {
+        element: <ProtectedRoute />,
+        children: [
+          { path: "/worklist", element: <WorklistPage /> },
+          { path: "/reports/:id", element: <ReportEditorPage /> },
+        ],
+      },
+      {
+        element: <ProtectedRoute allowedRoles={["admin"]} />,
+        children: [
+          { path: "/templates", element: <TemplateListPage /> },
+        ],
+      },
+    ]);
+    ```
+  </Tab>
+  <Tab title="Roles">
+    Every authenticated user has a `role` field on their `user` object. Use `useAuth().user.role` to conditionally render UI or gate actions.
+
+    The four supported roles are:
+
+    | Role | Description |
+    |---|---|
+    | `radiologist` | Can view worklist, author reports, finalize and sign off reports |
+    | `resident` | Can author and submit preliminary reports; cannot finalize |
+    | `technologist` | Can view worklist and claim studies; cannot author reports |
+    | `admin` | Full access including template management and user administration |
+
+    ```tsx
+    import { useAuth } from "@/context/AuthContext";
+
+    export function FinalizeButton({ reportId }: { reportId: string }) {
+      const { user } = useAuth();
+
+      const canFinalize =
+        user?.role === "radiologist" || user?.role === "admin";
+
+      if (!canFinalize) return null;
+
+      return (
+        <button onClick={() => finalizeReport(reportId)}>
+          Finalize Report
+        </button>
+      );
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Token Refresh
+
+When the access token expires, the Axios interceptor automatically attempts a silent refresh before the original request fails. You do not need to handle this manually in your components.
+
+```ts
+// src/lib/axiosClient.ts
+import axios from "axios";
+
+export const apiClient = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL,
+  withCredentials: true, // required to send the HttpOnly refresh token cookie
+});
+
+apiClient.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+
+      try {
+        // Exchange the HttpOnly refresh token cookie for a new access token
+        const { data } = await apiClient.post("/api/auth/refresh");
+        // Update in-memory token via auth store/context setter
+        setAccessToken(data.accessToken);
+        originalRequest.headers["Authorization"] = `Bearer ${data.accessToken}`;
+        return apiClient(originalRequest);
+      } catch {
+        // Refresh failed — redirect to login
+        window.location.href = "/login";
+      }
+    }
+
+    return Promise.reject(error);
+  }
+);
+```
+
+## Session Expiry
+
+| Token | Storage | TTL | Refresh strategy |
+|---|---|---|---|
+| Access token | In-memory (React state) | 15 minutes | Axios interceptor calls `POST /api/auth/refresh` |
+| Refresh token | HttpOnly cookie | 7 days | Re-login required after expiry |
+
+If the refresh token has expired or been revoked, the interceptor catches the failure and redirects the user to `/login`. The original deep-link URL is preserved as a `redirect` query parameter so the user lands back on their intended page after re-authenticating.

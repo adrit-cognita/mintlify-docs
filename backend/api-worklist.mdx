@@ -1,0 +1,310 @@
+---
+title: "Worklist API Endpoints: Studies, Filters, and Claims"
+sidebarTitle: "Worklist Endpoints"
+description: "REST API reference for the Mosaic Reporting worklist: listing studies, claiming a study, releasing a claim, and updating study status."
+---
+
+The Worklist API provides access to radiology studies that have been ingested from your PACS into Mosaic Reporting. Radiologists use it to browse incoming studies, claim one for reporting, and track progress. Studies flow through a lifecycle of `PENDING` → `IN_PROGRESS` → `COMPLETE`, driven by claim and report finalization events.
+
+---
+
+## GET /api/v1/worklist
+
+Returns a paginated, filterable list of worklist studies. You can combine multiple query parameters to narrow results by modality, priority, date, assignment, and free-text search.
+
+### Query Parameters
+
+<ParamField query="status" type="string">
+  Filter by study status. One of: `PENDING`, `IN_PROGRESS`, `COMPLETE`.
+</ParamField>
+
+<ParamField query="modality" type="string">
+  Filter by imaging modality (e.g., `CT`, `MR`, `XR`, `US`, `NM`).
+</ParamField>
+
+<ParamField query="priority" type="string">
+  Filter by study priority. One of: `ROUTINE`, `URGENT`, `STAT`.
+</ParamField>
+
+<ParamField query="assignedTo" type="string">
+  Filter by the user ID of the assigned radiologist. Pass `unassigned` to return only unclaimed studies.
+</ParamField>
+
+<ParamField query="search" type="string">
+  Free-text search across patient name, patient ID, and accession number.
+</ParamField>
+
+<ParamField query="dateFrom" type="string">
+  ISO 8601 date — return studies with a `studyDate` on or after this value.
+</ParamField>
+
+<ParamField query="dateTo" type="string">
+  ISO 8601 date — return studies with a `studyDate` on or before this value.
+</ParamField>
+
+<ParamField query="sortBy" type="string" default="studyDate">
+  Field to sort by. Accepted values: `studyDate`, `priority`, `patientName`, `modality`, `createdAt`.
+</ParamField>
+
+<ParamField query="sortOrder" type="string" default="desc">
+  Sort direction: `asc` or `desc`.
+</ParamField>
+
+<ParamField query="page" type="number" default="1">
+  Page number (1-indexed).
+</ParamField>
+
+<ParamField query="pageSize" type="number" default="25">
+  Number of results per page. Maximum 100.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="array">
+  Array of worklist study summary objects. Each includes `id`, `studyInstanceUID`, `accessionNumber`, `patientName`, `patientId`, `modality`, `studyDate`, `priority`, `status`, `assignedToId`, `createdAt`.
+</ResponseField>
+<ResponseField name="meta" type="object">
+  <Expandable title="meta">
+    <ResponseField name="page" type="number">Current page.</ResponseField>
+    <ResponseField name="pageSize" type="number">Records per page.</ResponseField>
+    <ResponseField name="total" type="number">Total matching studies across all pages.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl "https://api.mosaic.internal/api/v1/worklist?status=PENDING&modality=CT&priority=STAT&page=1&pageSize=20" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": [
+    {
+      "id": "clstd789ghi",
+      "studyInstanceUID": "1.2.840.10008.5.1.4.1.1.2",
+      "accessionNumber": "ACC20240615001",
+      "patientName": "Doe, John A",
+      "patientId": "MRN123456",
+      "modality": "CT",
+      "studyDate": "2024-06-15T08:00:00.000Z",
+      "priority": "STAT",
+      "status": "PENDING",
+      "assignedToId": null,
+      "createdAt": "2024-06-15T08:05:00.000Z"
+    }
+  ],
+  "meta": { "page": 1, "pageSize": 20, "total": 1 }
+}
+```
+
+</CodeGroup>
+
+---
+
+## GET /api/v1/worklist/:id
+
+Returns the full record for a single worklist study, including all stored DICOM metadata fields and the associated report (if one exists).
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique worklist study ID.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  <Expandable title="data">
+    <ResponseField name="id" type="string">Unique study record ID.</ResponseField>
+    <ResponseField name="studyInstanceUID" type="string">DICOM Study Instance UID.</ResponseField>
+    <ResponseField name="accessionNumber" type="string">RIS/HIS accession number.</ResponseField>
+    <ResponseField name="patientName" type="string">Patient name (DICOM format: `Last^First^Middle`).</ResponseField>
+    <ResponseField name="patientId" type="string">Patient MRN or identifier.</ResponseField>
+    <ResponseField name="modality" type="string">Imaging modality code.</ResponseField>
+    <ResponseField name="studyDate" type="string">ISO 8601 datetime of the study acquisition.</ResponseField>
+    <ResponseField name="priority" type="string">Study priority: `ROUTINE`, `URGENT`, or `STAT`.</ResponseField>
+    <ResponseField name="status" type="string">Worklist status: `PENDING`, `IN_PROGRESS`, or `COMPLETE`.</ResponseField>
+    <ResponseField name="assignedToId" type="string">User ID of the claiming radiologist, or `null` if unclaimed.</ResponseField>
+    <ResponseField name="report" type="object">The associated report object if one exists, or `null`. Includes `id`, `status`, `updatedAt`.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601 timestamp of when the study was ingested.</ResponseField>
+    <ResponseField name="updatedAt" type="string">ISO 8601 timestamp of the most recent status change.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl https://api.mosaic.internal/api/v1/worklist/clstd789ghi \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "id": "clstd789ghi",
+    "studyInstanceUID": "1.2.840.10008.5.1.4.1.1.2",
+    "accessionNumber": "ACC20240615001",
+    "patientName": "Doe^John^A",
+    "patientId": "MRN123456",
+    "modality": "CT",
+    "studyDate": "2024-06-15T08:00:00.000Z",
+    "priority": "STAT",
+    "status": "PENDING",
+    "assignedToId": null,
+    "report": null,
+    "createdAt": "2024-06-15T08:05:00.000Z",
+    "updatedAt": "2024-06-15T08:05:00.000Z"
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## PATCH /api/v1/worklist/:id/claim
+
+Claims a worklist study for the currently authenticated user. Sets `assignedToId` to the requesting user's ID and transitions `status` from `PENDING` to `IN_PROGRESS`. If the study is already claimed by another user, the request is rejected with `409 STUDY_ALREADY_CLAIMED`.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique worklist study ID to claim.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  The updated study object with `status: "IN_PROGRESS"` and `assignedToId` set to the current user's ID.
+</ResponseField>
+
+### Response — 409 Conflict
+
+Returns `STUDY_ALREADY_CLAIMED` if another user has already claimed this study.
+
+<CodeGroup>
+
+```bash Request
+curl -X PATCH https://api.mosaic.internal/api/v1/worklist/clstd789ghi/claim \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "id": "clstd789ghi",
+    "status": "IN_PROGRESS",
+    "assignedToId": "clid123abc",
+    "updatedAt": "2024-06-15T09:00:00.000Z"
+  }
+}
+```
+
+```json Response 409
+{
+  "success": false,
+  "error": {
+    "code": "STUDY_ALREADY_CLAIMED",
+    "message": "Study clstd789ghi is already claimed by another user.",
+    "statusCode": 409
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## PATCH /api/v1/worklist/:id/release
+
+Releases a previously claimed study back to the unclaimed pool. Sets `assignedToId` to `null` and transitions `status` back to `PENDING`. Only the user who currently holds the claim, or an `ADMIN`, can release it. Any associated report in `DRAFT` status is also unassigned.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique worklist study ID to release.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  The updated study with `status: "PENDING"` and `assignedToId: null`.
+</ResponseField>
+
+### Response — 403 Forbidden
+
+Returns `AUTH_UNAUTHORIZED` if you are not the current claim holder or an `ADMIN`.
+
+<CodeGroup>
+
+```bash Request
+curl -X PATCH https://api.mosaic.internal/api/v1/worklist/clstd789ghi/release \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "id": "clstd789ghi",
+    "status": "PENDING",
+    "assignedToId": null,
+    "updatedAt": "2024-06-15T10:00:00.000Z"
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## PATCH /api/v1/worklist/:id/complete
+
+Marks a worklist study as complete. This is called automatically by the backend when an associated report is finalized, but can also be called directly by an `ADMIN` if needed. Transitions `status` from `IN_PROGRESS` to `COMPLETE`. Studies in `COMPLETE` status are read-only; they cannot be claimed or released.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique worklist study ID to mark complete.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  The updated study with `status: "COMPLETE"` and the final `updatedAt` timestamp.
+</ResponseField>
+
+### Response — 422 Unprocessable Entity
+
+Returns `REPORT_INVALID_TRANSITION` if the study is not currently in `IN_PROGRESS` status.
+
+<CodeGroup>
+
+```bash Request
+curl -X PATCH https://api.mosaic.internal/api/v1/worklist/clstd789ghi/complete \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "id": "clstd789ghi",
+    "status": "COMPLETE",
+    "assignedToId": "clid123abc",
+    "updatedAt": "2024-06-15T12:05:00.000Z"
+  }
+}
+```
+
+</CodeGroup>

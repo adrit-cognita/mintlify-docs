@@ -1,0 +1,141 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "maple",
+  "name": "Mosaic Reporting",
+  "colors": {
+    "primary": "#ef7025",
+    "light": "#eec9bc",
+    "dark": "#4fa1ab"
+  },
+  "favicon": "/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "navbar": {
+    "primary": {
+      "type": "button",
+      "label": "Open App",
+      "href": "https://mosaic.reporting"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Frontend",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "frontend/introduction",
+              "frontend/architecture"
+            ]
+          },
+          {
+            "group": "Core Subsystems",
+            "pages": [
+              "frontend/auth",
+              "frontend/report-editor",
+              "frontend/worklist",
+              "frontend/viewer-integration",
+              "frontend/templates"
+            ]
+          },
+          {
+            "group": "State & Data",
+            "pages": [
+              "frontend/state-management",
+              "frontend/api-client",
+              "frontend/routing"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "frontend/environment",
+              "frontend/theming"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Backend",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "backend/introduction",
+              "backend/architecture"
+            ]
+          },
+          {
+            "group": "Core Subsystems",
+            "pages": [
+              "backend/auth-service",
+              "backend/report-service",
+              "backend/worklist-service",
+              "backend/template-service",
+              "backend/notification-service"
+            ]
+          },
+          {
+            "group": "Data & Integrations",
+            "pages": [
+              "backend/database",
+              "backend/dicom-integration",
+              "backend/hl7-fhir"
+            ]
+          },
+          {
+            "group": "API Reference",
+            "pages": [
+              "backend/api-overview",
+              "backend/api-auth",
+              "backend/api-reports",
+              "backend/api-worklist"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Deployments",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "deployments/introduction",
+              "deployments/architecture"
+            ]
+          },
+          {
+            "group": "Frontend Infrastructure",
+            "pages": [
+              "deployments/frontend-hosting",
+              "deployments/cdn-config",
+              "deployments/frontend-ci-cd"
+            ]
+          },
+          {
+            "group": "Backend Infrastructure",
+            "pages": [
+              "deployments/backend-hosting",
+              "deployments/database-infra",
+              "deployments/backend-ci-cd"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "deployments/monitoring",
+              "deployments/secrets-config",
+              "deployments/environments"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {}
+  }
+}

@@ -1,0 +1,240 @@
+---
+title: "Frontend Routing: Pages, Protected Routes, and Navigation"
+sidebarTitle: "Routing"
+description: "The Mosaic Reporting router structure built on React Router v6, covering route definitions, protected route guards, lazy loading, and navigation patterns."
+---
+
+Mosaic Reporting's frontend router is built on React Router v6 using the `createBrowserRouter` API. Every page is lazy-loaded to keep the initial bundle small, protected routes enforce authentication at the router level, and role-based guards prevent unauthorized access to admin-only sections without scattering permission checks across individual components.
+
+## Route Structure
+
+The table below lists every top-level route, the component it renders, and its access requirements.
+
+| Path | Component | Access |
+|---|---|---|
+| `/` | Redirect → `/worklist` | Public (redirect) |
+| `/login` | `<LoginPage>` | Public |
+| `/worklist` | `<WorklistPage>` | Protected — authenticated users |
+| `/reports/:reportId` | `<ReportEditorPage>` | Protected — authenticated users |
+| `/reports/new` | `<NewReportPage>` | Protected — authenticated users |
+| `/templates` | `<TemplateListPage>` | Protected — admin role required |
+| `/templates/:templateId` | `<TemplateEditorPage>` | Protected — admin role required |
+| `/profile` | `<ProfilePage>` | Protected — authenticated users |
+| `*` | `<NotFoundPage>` | Public (catch-all) |
+
+## Router Definition
+
+The router is created once in `src/router.tsx` and passed to `<RouterProvider>` in the application root. All feature pages are imported with `React.lazy()` so they are code-split into separate chunks automatically by Vite.
+
+```tsx
+// src/router.tsx
+import React, { lazy, Suspense } from 'react';
+import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
+import { RoleGuard } from '@/components/auth/RoleGuard';
+import { PageSpinner } from '@/components/ui/PageSpinner';
+import { RootLayout } from '@/layouts/RootLayout';
+
+// Lazy-loaded page components
+const LoginPage         = lazy(() => import('@/pages/LoginPage'));
+const WorklistPage      = lazy(() => import('@/pages/WorklistPage'));
+const ReportEditorPage  = lazy(() => import('@/pages/ReportEditorPage'));
+const NewReportPage     = lazy(() => import('@/pages/NewReportPage'));
+const TemplateListPage  = lazy(() => import('@/pages/TemplateListPage'));
+const TemplateEditorPage = lazy(() => import('@/pages/TemplateEditorPage'));
+const ProfilePage       = lazy(() => import('@/pages/ProfilePage'));
+const NotFoundPage      = lazy(() => import('@/pages/NotFoundPage'));
+
+const withSuspense = (element: React.ReactNode) => (
+  <Suspense fallback={<PageSpinner />}>{element}</Suspense>
+);
+
+export const router = createBrowserRouter([
+  {
+    path: '/',
+    element: <Navigate to="/worklist" replace />,
+  },
+  {
+    path: '/login',
+    element: withSuspense(<LoginPage />),
+  },
+  {
+    element: <ProtectedRoute />,       // auth wall for all children
+    children: [
+      {
+        element: <RootLayout />,       // shared app shell (nav, sidebar)
+        children: [
+          {
+            path: '/worklist',
+            element: withSuspense(<WorklistPage />),
+          },
+          {
+            path: '/reports/new',
+            element: withSuspense(<NewReportPage />),
+          },
+          {
+            path: '/reports/:reportId',
+            element: withSuspense(<ReportEditorPage />),
+          },
+          {
+            path: '/profile',
+            element: withSuspense(<ProfilePage />),
+          },
+          // Admin-only routes wrapped in RoleGuard
+          {
+            element: <RoleGuard requiredRole="admin" />,
+            children: [
+              {
+                path: '/templates',
+                element: withSuspense(<TemplateListPage />),
+              },
+              {
+                path: '/templates/:templateId',
+                element: withSuspense(<TemplateEditorPage />),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    path: '*',
+    element: withSuspense(<NotFoundPage />),
+  },
+]);
+```
+
+## Protected Routes
+
+### `<ProtectedRoute>`
+
+`<ProtectedRoute>` is a layout route that checks whether the current user is authenticated before rendering its children. Unauthenticated users are redirected to `/login`, and the original destination is preserved in `state.from` so you can redirect back after login.
+
+```tsx
+// src/components/auth/ProtectedRoute.tsx
+import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import { useAuthStore } from '@/stores/authStore';
+
+export function ProtectedRoute() {
+  const { status } = useAuthStore();
+  const location = useLocation();
+
+  if (status === 'idle') {
+    // Auth state is still being restored from storage — show nothing yet
+    return null;
+  }
+
+  if (status === 'unauthenticated') {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  return <Outlet />;
+}
+```
+
+### `<RoleGuard>`
+
+`<RoleGuard>` sits inside `<ProtectedRoute>` and performs an additional role check. Users who are authenticated but lack the required role see a `403 Forbidden` page instead of being logged out.
+
+```tsx
+// src/components/auth/RoleGuard.tsx
+import { Navigate, Outlet } from 'react-router-dom';
+import { useAuthStore } from '@/stores/authStore';
+
+interface RoleGuardProps {
+  requiredRole: 'admin' | 'radiologist' | 'technician';
+}
+
+export function RoleGuard({ requiredRole }: RoleGuardProps) {
+  const { user } = useAuthStore();
+
+  if (!user?.roles.includes(requiredRole)) {
+    return <Navigate to="/403" replace />;
+  }
+
+  return <Outlet />;
+}
+```
+
+<Note>
+  `<RoleGuard>` must always be nested inside `<ProtectedRoute>`. It assumes the user object is already populated — it does not re-check authentication itself.
+</Note>
+
+## Lazy Loading
+
+Every feature page is wrapped in `React.lazy()` and rendered inside a `<Suspense>` boundary. The `withSuspense` helper in `router.tsx` applies the `<PageSpinner>` fallback consistently without repeating the `<Suspense>` wrapper at every route.
+
+Vite automatically creates a separate chunk for each lazy-loaded import during the production build. The initial bundle includes only the router shell, the auth stores, and the shared layout — heavy feature code downloads only when the user navigates to that route.
+
+```tsx
+// Pattern used for every page
+const WorklistPage = lazy(() => import('@/pages/WorklistPage'));
+
+// Wrapped with Suspense at the route level
+{
+  path: '/worklist',
+  element: withSuspense(<WorklistPage />),
+}
+```
+
+## Navigation Patterns
+
+### Programmatic Navigation
+
+Use the `useNavigate()` hook for navigation triggered by user actions or business logic:
+
+```tsx
+import { useNavigate } from 'react-router-dom';
+
+function WorklistRow({ reportId }: { reportId: string }) {
+  const navigate = useNavigate();
+
+  const handleOpen = () => {
+    navigate(`/reports/${reportId}`);
+  };
+
+  return <button onClick={handleOpen}>Open Report</button>;
+}
+```
+
+### Declarative Links
+
+Use `<Link>` from React Router for any anchor-style navigation in markup. This preserves browser history correctly and enables prefetching:
+
+```tsx
+import { Link } from 'react-router-dom';
+
+function SidebarNav() {
+  return (
+    <nav>
+      <Link to="/worklist">Worklist</Link>
+      <Link to="/profile">Profile</Link>
+    </nav>
+  );
+}
+```
+
+### Redirecting After Login
+
+After a successful login, redirect the user to the page they originally tried to reach by reading `location.state.from`:
+
+```tsx
+import { useNavigate, useLocation } from 'react-router-dom';
+
+function LoginPage() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const from = (location.state as any)?.from?.pathname ?? '/worklist';
+
+  const handleLoginSuccess = () => {
+    navigate(from, { replace: true });
+  };
+
+  // ...
+}
+```
+
+<Warning>
+  Always pass `replace: true` when redirecting after login. Without it, pressing the browser back button returns the user to the login page even though they are already authenticated.
+</Warning>

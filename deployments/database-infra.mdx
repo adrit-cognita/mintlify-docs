@@ -1,0 +1,135 @@
+---
+title: "Database Infrastructure: RDS PostgreSQL and Redis Setup"
+sidebarTitle: "Database Infra"
+description: "Configure Mosaic Reporting's managed PostgreSQL (RDS) and Redis (ElastiCache) instances: sizing, backups, connection pooling, and migration strategy."
+---
+
+Mosaic Reporting relies on two data stores: a managed PostgreSQL instance (AWS RDS) as the primary relational database and a managed Redis instance (AWS ElastiCache) for caching, session storage, and job queuing. Both are fully managed services — AWS handles OS patching, minor version upgrades, and hardware replacement. Your operational responsibilities are limited to schema migrations, backup verification, and capacity planning.
+
+## PostgreSQL (AWS RDS)
+
+### Version and Configuration
+
+Mosaic Reporting targets **PostgreSQL 15**. The RDS instance is configured with the following key parameters:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `max_connections` | 200 | Kept low because PgBouncer multiplexes connections |
+| `shared_buffers` | 25% of instance RAM | Default RDS tuning |
+| `work_mem` | 16 MB | Per-sort/hash operation memory |
+| `log_min_duration_statement` | 1000 ms | Log queries taking longer than 1 second |
+| `pg_stat_statements` | enabled | Query performance tracking |
+
+### Instance Sizing by Environment
+
+| Environment | Instance Class | vCPU | RAM | Storage | Multi-AZ |
+|-------------|---------------|------|-----|---------|---------|
+| `development` | Local Docker (`postgres:15`) | — | — | — | No |
+| `staging` | `db.t3.medium` | 2 | 4 GB | 50 GB gp3 | No |
+| `production` | `db.r6g.large` | 2 | 16 GB | 200 GB gp3 | Yes |
+
+**Multi-AZ** in production maintains a synchronous standby replica in a second Availability Zone. AWS automatically promotes the standby in the event of a primary failure, typically within 60–120 seconds, with no application changes required.
+
+### Connection Pooling with PgBouncer
+
+Each backend container opens connections through **PgBouncer** rather than directly to RDS. PgBouncer runs in **transaction pool mode**, which means a database connection is held only for the duration of a single transaction and then returned to the pool. This dramatically reduces the number of real PostgreSQL connections required even under high concurrency.
+
+PgBouncer is deployed as a sidecar container in the same ECS task (or as a separate Kubernetes Deployment on the same private subnet). The backend's `DATABASE_URL` points to PgBouncer, not directly to RDS.
+
+```
+Backend container → PgBouncer (port 5432) → RDS PostgreSQL (port 5432)
+```
+
+Typical pool sizing:
+
+| Setting | Value |
+|---------|-------|
+| `pool_mode` | `transaction` |
+| `max_client_conn` | 500 |
+| `default_pool_size` | 20 |
+| `reserve_pool_size` | 5 |
+
+### Backups and Recovery
+
+- **Automated snapshots**: RDS takes a full daily snapshot in the maintenance window. Snapshots are retained for 7 days.
+- **Point-in-time recovery (PITR)**: enabled; transaction logs are archived continuously, allowing restore to any second within the 7-day retention window.
+- **Manual snapshots**: taken before every major migration or breaking change, retained until explicitly deleted.
+- **Cross-region replication**: in production, consider enabling RDS cross-region read replicas as a disaster recovery measure for regional outages.
+
+### Database Migrations
+
+<Warning>
+  Never run `prisma migrate dev` in production. This command is intended only for local development — it creates migration files interactively and may reset the database. In production, use only `prisma migrate deploy`, which applies pending migrations without altering the migration history.
+</Warning>
+
+Migrations run as a **one-off ECS task** (or Kubernetes Job) in the CI/CD pipeline, immediately before the new service containers are deployed:
+
+```bash
+npx prisma migrate deploy
+```
+
+The migration task uses the same Docker image as the API but overrides the entrypoint to run only the migration command. It shares the same `DATABASE_URL` secret. The CI pipeline waits for the migration task to exit successfully before proceeding with the service update.
+
+## Redis (AWS ElastiCache)
+
+### Use Cases
+
+Redis in Mosaic Reporting handles four distinct workloads:
+
+| Use Case | Key Pattern | TTL |
+|----------|------------|-----|
+| Access token cache | `auth:access:<jti>` | Equal to JWT expiry (~15 min) |
+| Refresh token store | `auth:refresh:<userId>` | Equal to refresh token expiry (~7 days) |
+| BullMQ job queues | `bull:<queueName>:*` | Managed by BullMQ |
+| Worklist result cache | `worklist:<userId>:<hash>` | 60 seconds |
+
+### Instance Configuration by Environment
+
+| Environment | Setup | Node Type | Cluster Mode |
+|-------------|-------|-----------|-------------|
+| `development` | Local Docker (`redis:7-alpine`) | — | No |
+| `staging` | ElastiCache single node | `cache.t3.micro` | No |
+| `production` | ElastiCache cluster | `cache.r6g.large` × 3 shards | Yes |
+
+**Cluster mode** in production shards keyspace across three nodes, providing both horizontal scaling and fault tolerance. A primary and replica are maintained for each shard; ElastiCache automatically promotes a replica if the primary node fails.
+
+### Eviction Policy
+
+The ElastiCache instance uses `allkeys-lru` as its eviction policy. When Redis reaches its memory limit it evicts the least-recently-used keys across all keyspaces, regardless of TTL. This prevents out-of-memory errors but means low-priority cached data (e.g., worklist caches) may be evicted under high memory pressure. The application handles cache misses gracefully by falling through to the database.
+
+### Redis Configuration Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `maxmemory-policy` | `allkeys-lru` | Graceful eviction under memory pressure |
+| `appendonly` | `no` | AOF disabled; all Redis data is reconstructible from PostgreSQL |
+| `notify-keyspace-events` | `Ex` | Keyspace notifications for expired keys (used by BullMQ) |
+| `tcp-keepalive` | `60` | Detects dead connections within 60 seconds |
+
+### Connection String
+
+The `REDIS_URL` secret follows the standard `redis://` URI format:
+
+```text
+redis://:PASSWORD@mosaic-redis.xxxxxx.ng.0001.use1.cache.amazonaws.com:6379
+```
+
+For cluster mode, use the cluster configuration endpoint:
+
+```text
+redis://:PASSWORD@mosaic-redis.cluster.xxxxxx.ng.0001.use1.cache.amazonaws.com:6379
+```
+
+The application must use a Redis client that supports cluster mode (e.g., `ioredis` with `new Redis.Cluster([...])`) when connecting to a clustered ElastiCache instance.
+
+## Full Environment Comparison
+
+| Property | Development | Staging | Production |
+|----------|------------|---------|-----------|
+| **PostgreSQL** | Docker (`localhost:5432`) | RDS `db.t3.medium` | RDS `db.r6g.large` Multi-AZ |
+| **PostgreSQL storage** | Ephemeral volume | 50 GB gp3 | 200 GB gp3 |
+| **PgBouncer** | Optional | Sidecar container | Sidecar container |
+| **RDS backups** | None | 3-day retention | 7-day retention + PITR |
+| **Redis** | Docker (`localhost:6379`) | ElastiCache single node | ElastiCache cluster (3 shards) |
+| **Redis eviction** | `noeviction` (local) | `allkeys-lru` | `allkeys-lru` |
+| **Migrations** | `prisma migrate dev` | `prisma migrate deploy` (CI) | `prisma migrate deploy` (CI) |

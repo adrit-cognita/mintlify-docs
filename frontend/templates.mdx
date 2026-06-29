@@ -1,0 +1,218 @@
+---
+title: "Report Templates: Creating and Managing Structured Templates"
+sidebarTitle: "Templates"
+description: "Mosaic Reporting templates define the structure of radiology reports. Learn how templates are loaded, edited, and applied when starting a new report."
+---
+
+Report templates are the foundation of the structured authoring experience in Mosaic Reporting. Each template defines the sections and fields that appear in the report editor — controlling what information is captured, in what order, and in what format. Templates are version-controlled, meaning changes you make never alter reports that were already created using an earlier version.
+
+<Note>
+  Only users with the **`admin`** role can create, edit, clone, or delete templates. All other roles have read-only access to the template list.
+</Note>
+
+## Template Structure
+
+Templates are stored as JSON documents. Each template contains a list of **sections**, and each section contains a list of **fields**. Every field declares its type, a human-readable label, whether it is required, and any default value or options.
+
+### Minimal Template Schema Example
+
+```json
+{
+  "id": "ct-chest-routine-v1",
+  "name": "CT Chest — Routine",
+  "version": 1,
+  "modality": "CT",
+  "bodyPart": "Chest",
+  "sections": [
+    {
+      "id": "clinical-history",
+      "title": "Clinical History",
+      "fields": [
+        {
+          "id": "indication",
+          "type": "textarea",
+          "label": "Indication",
+          "required": true,
+          "defaultValue": ""
+        }
+      ]
+    },
+    {
+      "id": "findings",
+      "title": "Findings",
+      "fields": [
+        {
+          "id": "lung-parenchyma",
+          "type": "textarea",
+          "label": "Lung Parenchyma",
+          "required": true,
+          "defaultValue": ""
+        },
+        {
+          "id": "nodule-present",
+          "type": "radio",
+          "label": "Pulmonary Nodule Present",
+          "required": true,
+          "options": ["Yes", "No"],
+          "defaultValue": "No"
+        },
+        {
+          "id": "nodule-size",
+          "type": "measurement",
+          "label": "Nodule Size",
+          "required": false,
+          "unit": "mm",
+          "defaultValue": null
+        }
+      ]
+    },
+    {
+      "id": "impression",
+      "title": "Impression",
+      "fields": [
+        {
+          "id": "impression-text",
+          "type": "textarea",
+          "label": "Impression",
+          "required": true,
+          "defaultValue": ""
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Field Types
+
+Each field in a template must declare one of the following types:
+
+<AccordionGroup>
+  <Accordion title="text — Single-line text input">
+    Renders a single-line Tiptap rich-text input. Use this for short, free-form values like laterality descriptions or technique labels.
+
+    ```json
+    {
+      "id": "technique-summary",
+      "type": "text",
+      "label": "Technique",
+      "required": false,
+      "defaultValue": ""
+    }
+    ```
+  </Accordion>
+  <Accordion title="textarea — Multi-line rich text">
+    Renders a multi-line Tiptap editor. Use this for narrative content such as findings and impressions. Supports bold, italic, and lists.
+
+    ```json
+    {
+      "id": "impression-text",
+      "type": "textarea",
+      "label": "Impression",
+      "required": true,
+      "defaultValue": ""
+    }
+    ```
+  </Accordion>
+  <Accordion title="dropdown — Select from a list">
+    Renders a select control. You must provide an `options` array of string values. Optionally set a `defaultValue` matching one of the options.
+
+    ```json
+    {
+      "id": "contrast-agent",
+      "type": "dropdown",
+      "label": "Contrast Agent",
+      "required": true,
+      "options": ["None", "Iodinated IV", "Gadolinium IV", "Oral"],
+      "defaultValue": "None"
+    }
+    ```
+  </Accordion>
+  <Accordion title="radio — Single choice from a small option set">
+    Renders inline radio buttons. Best suited to binary or small-set choices where all options should be visible without opening a dropdown.
+
+    ```json
+    {
+      "id": "nodule-present",
+      "type": "radio",
+      "label": "Pulmonary Nodule Present",
+      "required": true,
+      "options": ["Yes", "No"],
+      "defaultValue": "No"
+    }
+    ```
+  </Accordion>
+  <Accordion title="checkbox — Boolean flag">
+    Renders a single checkbox. The stored value is `true` or `false`. Use for incidental findings flags or attestation checkboxes.
+
+    ```json
+    {
+      "id": "incidental-finding",
+      "type": "checkbox",
+      "label": "Incidental finding requiring follow-up",
+      "required": false,
+      "defaultValue": false
+    }
+    ```
+  </Accordion>
+  <Accordion title="measurement — Numeric value with unit">
+    Renders a numeric input paired with a unit label. The value is stored as a number; the unit is part of the field definition and is not editable by the reporter.
+
+    ```json
+    {
+      "id": "nodule-size",
+      "type": "measurement",
+      "label": "Nodule Size",
+      "required": false,
+      "unit": "mm",
+      "defaultValue": null
+    }
+    ```
+
+    Measurements can also be populated automatically from DICOM viewer annotations. See the [DICOM Viewer Integration](/frontend/viewer-integration) page for details.
+  </Accordion>
+  <Accordion title="date — Date picker">
+    Renders a date picker input. The stored value is an ISO 8601 date string (`YYYY-MM-DD`). Use for prior study comparison dates or clinical event dates.
+
+    ```json
+    {
+      "id": "prior-study-date",
+      "type": "date",
+      "label": "Date of Prior Study",
+      "required": false,
+      "defaultValue": null
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Template Management UI
+
+You access template management at the `/templates` route. The interface is divided into three components:
+
+| Component | Route | Purpose |
+|---|---|---|
+| `<TemplateListPage>` | `/templates` | Lists all templates with name, modality, version, and last-modified date |
+| `<TemplateEditorPage>` | `/templates/:id/edit` | Full drag-and-drop editor for sections and fields |
+| `<TemplateFieldEditor>` | (panel inside editor) | Per-field configuration: type, label, required, options, default value |
+
+From the list view you can:
+
+- **Create** a new template from scratch
+- **Clone** an existing template (the clone starts as version 1 with a new ID)
+- **Edit** a template (creates a new version — existing reports are unaffected)
+- **Delete** a template (only permitted when no reports reference any version of the template)
+
+## Applying a Template to a New Report
+
+When a new report is initiated from the worklist, Mosaic selects a template using the following precedence:
+
+1. **Auto-assignment** — if the worklist entry's modality and body part match exactly one template, that template is selected automatically.
+2. **User selection** — if multiple templates match (or none do), a modal prompts you to choose from the available templates before the editor opens.
+3. **Template pinning** — once the report is created, its `templateId` and `templateVersion` are locked. Subsequent edits to the template do not affect in-progress or completed reports.
+
+## Template Versioning
+
+Every time you save changes to a template in `<TemplateEditorPage>`, a new version is created. The version number increments by one. Previous versions are retained in the database for audit purposes and to correctly render older reports.
+
+You can view the version history of any template from the edit page's **Version History** sidebar panel. Viewing an older version shows a read-only diff against the current version; you cannot roll back directly, but you can clone an older version into a new template.

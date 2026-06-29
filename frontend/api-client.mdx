@@ -1,0 +1,220 @@
+---
+title: "API Client: Axios Configuration and Request Patterns"
+sidebarTitle: "API Client"
+description: "How the Mosaic Reporting frontend configures its Axios HTTP client, attaches auth headers, handles errors, and retries requests after token refresh."
+---
+
+The Mosaic frontend communicates with the backend through a single, shared Axios instance called `apiClient`. Configuring everything in one place — base URL, interceptors, error mapping — means every HTTP call in the application automatically gets auth headers, consistent error handling, and silent token refresh without any per-call boilerplate.
+
+## The `apiClient` Instance
+
+`apiClient` is created once at application startup and exported from `src/lib/apiClient.ts`. The base URL is read from the `VITE_API_BASE_URL` environment variable so the same build artifact can point to different backends across environments.
+
+```ts
+// src/lib/apiClient.ts
+import axios from 'axios';
+
+export const apiClient = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL,
+  timeout: 15_000,
+  headers: {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  },
+});
+```
+
+The instance is then passed to both interceptors (described below) in the same file before being exported. Nothing else in the codebase calls `axios.create()`.
+
+## Request Interceptor
+
+The request interceptor runs before every outgoing call. It reads the current access token from `useAuthStore` and attaches it as a `Bearer` token in the `Authorization` header:
+
+```ts
+// src/lib/apiClient.ts (continued)
+import { useAuthStore } from '@/stores/authStore';
+
+apiClient.interceptors.request.use(
+  (config) => {
+    // Read token directly from Zustand store state (not the hook)
+    const token = useAuthStore.getState().accessToken;
+
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+```
+
+<Note>
+  Access `useAuthStore.getState()` (the static getter) inside interceptors — not the React hook. Interceptors run outside of the React component tree, so hooks are not available there.
+</Note>
+
+## Response Interceptor and 401 Retry Logic
+
+The response interceptor handles two concerns:
+
+1. **Token refresh** — on a `401 Unauthorized`, it calls the refresh endpoint, stores the new token, and retries the original request exactly once.
+2. **Error mapping** — all other non-2xx responses are caught, mapped to a typed `ApiError` object, and a toast notification is dispatched via `useUIStore`.
+
+```ts
+// src/lib/apiClient.ts (continued)
+import { refreshAccessToken } from '@/api/auth';
+import { useUIStore } from '@/stores/uiStore';
+import { ApiError, mapAxiosError } from '@/lib/errors';
+
+let isRefreshing = false;
+let refreshQueue: Array<(token: string) => void> = [];
+
+apiClient.interceptors.response.use(
+  // Pass through successful responses unchanged
+  (response) => response,
+
+  async (error) => {
+    const originalRequest = error.config;
+
+    // ── 401 handling ──────────────────────────────────────────────────────────
+    if (error.response?.status === 401 && !originalRequest._retried) {
+      originalRequest._retried = true;
+
+      if (!isRefreshing) {
+        isRefreshing = true;
+        try {
+          const newToken = await refreshAccessToken();
+          useAuthStore.getState().setAccessToken(newToken);
+
+          // Drain the queue of requests that arrived while refresh was in flight
+          refreshQueue.forEach((resolve) => resolve(newToken));
+          refreshQueue = [];
+        } catch {
+          // Refresh failed — log out and redirect to /login
+          useAuthStore.getState().logout();
+          window.location.href = '/login';
+          return Promise.reject(error);
+        } finally {
+          isRefreshing = false;
+        }
+      }
+
+      // If a refresh is already in flight, queue this request
+      return new Promise((resolve) => {
+        refreshQueue.push((token: string) => {
+          originalRequest.headers.Authorization = `Bearer ${token}`;
+          resolve(apiClient(originalRequest));
+        });
+      });
+    }
+
+    // ── General error mapping ─────────────────────────────────────────────────
+    const apiError: ApiError = mapAxiosError(error);
+
+    useUIStore.getState().addToast({
+      variant: 'error',
+      title: `Error ${apiError.statusCode}`,
+      message: apiError.message,
+    });
+
+    return Promise.reject(apiError);
+  }
+);
+```
+
+### How the Refresh Queue Works
+
+If two requests fire simultaneously and both receive a `401`, only the first triggers a real refresh call. The second is held in `refreshQueue`. Once the refresh succeeds, all queued requests are replayed with the new token. This prevents a flood of redundant refresh calls.
+
+## Typed Error Objects
+
+All non-2xx responses are converted to `ApiError` before being re-thrown. This gives calling code a predictable shape to catch and inspect:
+
+```ts
+// src/lib/errors.ts
+export interface ApiError {
+  statusCode: number;
+  message: string;
+  errorCode: string;
+}
+
+export function mapAxiosError(error: unknown): ApiError {
+  if (axios.isAxiosError(error) && error.response) {
+    return {
+      statusCode: error.response.status,
+      message: error.response.data?.message ?? 'An unexpected error occurred.',
+      errorCode: error.response.data?.errorCode ?? 'UNKNOWN_ERROR',
+    };
+  }
+  return {
+    statusCode: 0,
+    message: 'Network error — please check your connection.',
+    errorCode: 'NETWORK_ERROR',
+  };
+}
+```
+
+### Common Error Codes
+
+| `errorCode` | HTTP status | Meaning |
+|---|---|---|
+| `UNAUTHORIZED` | 401 | Token missing, expired, or invalid (after refresh attempt) |
+| `FORBIDDEN` | 403 | Authenticated but lacks the required role or permission |
+| `REPORT_NOT_FOUND` | 404 | The requested report ID does not exist |
+| `STUDY_ALREADY_CLAIMED` | 409 | Another radiologist has already claimed the study |
+| `VALIDATION_ERROR` | 422 | Request body failed server-side validation; check `details` field |
+| `REPORT_LOCKED` | 423 | Report is locked for editing by another user |
+| `RATE_LIMITED` | 429 | Too many requests; back off and retry |
+| `INTERNAL_ERROR` | 500 | Unexpected server-side failure |
+| `NETWORK_ERROR` | 0 | Request never reached the server (offline, DNS, timeout) |
+
+## Using the API Client via React Query Hooks
+
+`apiClient` is never imported directly in components. Instead, all calls are wrapped in per-resource functions in `src/api/` and then exposed via React Query hooks in `src/hooks/api/`.
+
+```
+src/
+├── api/
+│   ├── reports.ts       ← raw apiClient calls: fetchReport(), saveReport(), …
+│   ├── worklist.ts
+│   └── templates.ts
+└── hooks/
+    └── api/
+        ├── useReport.ts  ← useQuery / useMutation wrappers
+        ├── useWorklist.ts
+        └── useTemplates.ts
+```
+
+A raw API function looks like this:
+
+```ts
+// src/api/reports.ts
+import { apiClient } from '@/lib/apiClient';
+import type { Report, ReportDraft } from '@/types';
+
+export async function fetchReport(reportId: string): Promise<Report> {
+  const { data } = await apiClient.get<Report>(`/reports/${reportId}`);
+  return data;
+}
+
+export async function saveReport(draft: ReportDraft): Promise<Report> {
+  const { data } = await apiClient.put<Report>(`/reports/${draft.id}`, draft);
+  return data;
+}
+```
+
+Components import only the React Query hook:
+
+```tsx
+// ✅ Correct — component consumes a React Query hook
+import { useReport } from '@/hooks/api/useReport';
+
+function ReportViewer({ reportId }: { reportId: string }) {
+  const { data, isLoading, error } = useReport(reportId);
+  // ...
+}
+```
+
+<Warning>
+  Never import `apiClient` directly inside a React component. All API access must go through React Query hooks. Direct calls bypass the cache, break optimistic updates, and make loading/error states harder to handle consistently.
+</Warning>

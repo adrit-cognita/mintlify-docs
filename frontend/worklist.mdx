@@ -1,0 +1,100 @@
+---
+title: "Worklist: Managing Radiology Study Queues in Mosaic"
+sidebarTitle: "Worklist"
+description: "The Mosaic Reporting worklist displays pending and completed radiology studies with filtering, sorting, and study claim and assignment for radiologists."
+---
+
+The worklist is the main landing view after login. It presents all radiology studies that are awaiting reporting, currently in progress, or recently completed — giving every member of the team a live picture of queue status. From the worklist, you can filter studies, sort by priority or date, and claim a study to begin reporting.
+
+## Data Source
+
+The worklist table is populated by `GET /api/worklist`. The endpoint accepts query parameters that map directly to the filter controls in the UI. All filtering and pagination happen server-side.
+
+### Filter Parameters
+
+| Parameter | Type | Accepted values | Description |
+|---|---|---|---|
+| `status` | `string` | `pending`, `in-progress`, `complete` | Filter by study reporting status |
+| `modality` | `string` | `CT`, `MRI`, `XR`, `US` | Filter by imaging modality |
+| `date_from` | `ISO 8601 date` | e.g. `2024-01-01` | Start of study date range |
+| `date_to` | `ISO 8601 date` | e.g. `2024-01-31` | End of study date range |
+| `assigned_to` | `string` (user ID) | Any valid user UUID | Filter to studies assigned to a specific radiologist |
+| `priority` | `string` | `STAT`, `routine` | Filter by clinical priority |
+| `page` | `integer` | `1`–`n` | Page number (25 studies per page) |
+
+## Component Hierarchy
+
+```text
+<WorklistPage>
+  ├── <WorklistFilters>   — filter bar: status, modality, date range, priority
+  └── <WorklistTable>
+        └── <StudyRow>   — one row per study; click to claim and open editor
+```
+
+`<WorklistFilters>` writes its state to the URL query string, so filter selections are shareable and browser-back-navigable.
+
+## Worklist Columns
+
+Each row in the worklist table displays the following columns:
+
+| Column | Description |
+|---|---|
+| Patient Name | Full name from the DICOM header |
+| MRN | Medical record number |
+| Modality | Imaging modality (CT, MRI, XR, US) |
+| Study Date | Date the images were acquired |
+| Body Part | Body region examined |
+| Priority | `STAT` or `Routine` — STAT rows are highlighted in red |
+| Status | `Pending`, `In Progress`, or `Complete` |
+| Assigned To | Radiologist currently holding the study, or unassigned |
+| Actions | Claim button; view-only link for completed studies |
+
+## Claiming a Study
+
+Clicking a study row triggers a `PATCH /api/worklist/:id/claim` request. This atomically assigns the study to you and sets its status to `in-progress`. If the study was already claimed by another user, the API returns a `409 Conflict` and the UI displays a toast notification indicating who holds the study.
+
+After a successful claim, the application navigates directly to the report editor at `/reports/new?studyId=<id>`.
+
+## Real-Time Updates
+
+<Note>
+  **STAT studies receive special handling.** When a STAT-priority study arrives in the system, the backend pushes a WebSocket notification to all connected clients. The worklist immediately moves the study to the top of the table regardless of current sort order and displays a persistent banner alert until the study is claimed.
+</Note>
+
+The worklist also polls `GET /api/worklist` every **60 seconds** to catch routine updates (new studies, status changes, reassignments). The 60-second interval refreshes silently in the background — the table updates without a visible loading spinner unless the filter state changes.
+
+```ts
+// src/features/worklist/hooks/useWorklist.ts
+import { useQuery } from "@tanstack/react-query";
+import { apiClient } from "@/lib/axiosClient";
+import { useWorklistFilters } from "./useWorklistFilters";
+
+export function useWorklist() {
+  const filters = useWorklistFilters();
+
+  return useQuery({
+    queryKey: ["worklist", filters],
+    queryFn: async () => {
+      const { data } = await apiClient.get("/api/worklist", {
+        params: filters,
+      });
+      return data;
+    },
+    refetchInterval: 60_000, // poll every 60 seconds
+    staleTime: 30_000,
+  });
+}
+```
+
+## Pagination
+
+The worklist is paginated server-side at **25 studies per page**. Pagination controls appear at the bottom of the table. The current page is tracked in the URL as the `page` query parameter, so you can share or bookmark a specific page of results.
+
+Changing any filter resets the page back to `1` automatically.
+
+## Sorting
+
+You can click any column header to sort by that column. Sorting state is also reflected in the URL (`sort_by` and `sort_dir` params). The default sort order is:
+
+1. Priority descending (`STAT` first)
+2. Study date ascending (oldest studies first within each priority tier)

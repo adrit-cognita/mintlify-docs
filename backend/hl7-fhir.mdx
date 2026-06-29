@@ -1,0 +1,167 @@
+---
+title: "HL7 and FHIR Integration for EMR/RIS Interoperability"
+sidebarTitle: "HL7 / FHIR"
+description: "How Mosaic Reporting sends finalized reports to EMR and RIS systems using HL7 v2 ORU messages and FHIR DiagnosticReport resources."
+---
+
+When a radiologist finalizes a report in Mosaic, the platform dispatches the report downstream to your EMR and/or RIS through one or both of two standard interoperability channels: **HL7 v2 ORU^R01** messages over MLLP, and **FHIR R4 DiagnosticReport** resources over REST. Both channels are independently configurable — you can enable one, both, or neither depending on the capabilities of your downstream systems.
+
+<Note>
+  Both the HL7 v2 and FHIR R4 integrations are optional. Configure only the channels your EMR or RIS supports. If neither is configured, reports are still finalized within Mosaic; downstream dispatch is simply skipped.
+</Note>
+
+---
+
+## Integration Architecture
+
+Report dispatch is handled asynchronously via BullMQ. When a report transitions to `FINAL` status, the `ReportService` enqueues a `dispatch-report` job. A BullMQ worker picks up the job, consults the channel configuration, and invokes the relevant adapter(s). Failures are retried with exponential backoff and recorded in `audit_logs`.
+
+---
+
+## HL7 v2 ORU^R01
+
+Mosaic sends **ORU^R01** (Unsolicited Observation Result) messages to your EMR or RIS over an MLLP (Minimal Lower Layer Protocol) TCP connection. The message structure follows HL7 v2.5 and includes:
+
+| Segment | Contents |
+|---|---|
+| `MSH` | Message header: sending application, receiving application, timestamp, message type |
+| `PID` | Patient identification: MRN, name, date of birth, sex |
+| `OBR` | Observation request: accession number, study date, modality, ordering provider |
+| `OBX` | Observation result: report body text (type `TX` or `ED` for PDF) |
+
+### Hl7Adapter
+
+The `Hl7Adapter` class uses the `hl7-standard` library. It manages the MLLP TCP connection, constructs the ORU message from the report and study objects, sends the message, and parses the ACK response.
+
+```typescript
+// src/hl7/hl7.adapter.ts (simplified)
+import Hl7Standard from 'hl7-standard';
+
+export class Hl7Adapter {
+  async sendOru(report: Report, study: WorklistStudy): Promise<void> {
+    const msg = new Hl7Standard('ORU^R01');
+
+    msg.set('MSH.3',  process.env.HL7_SENDING_APP);
+    msg.set('MSH.5',  process.env.HL7_RECEIVING_APP);
+    msg.set('MSH.10', generateMessageId());
+
+    msg.set('PID.3',  study.patientId);
+    msg.set('PID.5',  study.patientName);
+
+    msg.set('OBR.18', study.accessionNumber);
+    msg.set('OBR.7',  study.studyDate.toISOString());
+    msg.set('OBR.24', study.modality);
+
+    msg.set('OBX.2',  'TX');
+    msg.set('OBX.5',  report.body);
+
+    await this.sendViaMllp(msg.toString());
+  }
+}
+```
+
+### Sample ORU^R01 Message
+
+```hl7
+MSH|^~\&|MOSAIC|MOSAIC_FACILITY|EMR|EMR_FACILITY|20240615120000||ORU^R01|MSG00001|P|2.5
+PID|1||MRN123456^^^FACILITY||DOE^JOHN^A||19680312|M
+OBR|1||ACC20240615001|68.^^LN|||20240615093000||||||||||||||||F
+OBX|1|TX|RAD_REPORT^Radiology Report^LOCAL||Lungs are clear. No acute cardiopulmonary process.||||||F
+```
+
+---
+
+## FHIR R4 DiagnosticReport
+
+Mosaic publishes a **FHIR R4 `DiagnosticReport`** resource to a configured FHIR server via an HTTP POST. The report body is included as a `presentedForm` attachment and key metadata fields are mapped to standard FHIR elements.
+
+### FhirAdapter
+
+The `FhirAdapter` class uses the `fhir.js` client library. It maps the Mosaic report and study objects to the `DiagnosticReport` schema and POSTs the resource to `FHIR_SERVER_URL`.
+
+```typescript
+// src/fhir/fhir.adapter.ts (simplified)
+import FhirClient from 'fhir.js';
+
+export class FhirAdapter {
+  private client = FhirClient({ baseUrl: process.env.FHIR_SERVER_URL });
+
+  async publishDiagnosticReport(report: Report, study: WorklistStudy): Promise<void> {
+    const resource = {
+      resourceType: 'DiagnosticReport',
+      status: 'final',
+      code: {
+        coding: [{ system: 'http://loinc.org', code: '68604-8', display: 'Radiology Diagnostic study note' }],
+      },
+      subject: {
+        identifier: { value: study.patientId },
+        display: study.patientName,
+      },
+      effectiveDateTime: study.studyDate.toISOString(),
+      issued: report.updatedAt.toISOString(),
+      presentedForm: [
+        {
+          contentType: 'text/plain',
+          data: Buffer.from(report.body).toString('base64'),
+        },
+      ],
+    };
+
+    await this.client.create({ resource });
+  }
+}
+```
+
+### Sample FHIR DiagnosticReport
+
+```json
+{
+  "resourceType": "DiagnosticReport",
+  "status": "final",
+  "code": {
+    "coding": [
+      {
+        "system": "http://loinc.org",
+        "code": "68604-8",
+        "display": "Radiology Diagnostic study note"
+      }
+    ]
+  },
+  "subject": {
+    "identifier": { "value": "MRN123456" },
+    "display": "Doe, John A"
+  },
+  "effectiveDateTime": "2024-06-15T09:30:00Z",
+  "issued": "2024-06-15T12:05:00Z",
+  "presentedForm": [
+    {
+      "contentType": "text/plain",
+      "data": "THVuZ3MgYXJlIGNsZWFyLi4u"
+    }
+  ]
+}
+```
+
+---
+
+## HL7 v2 vs FHIR R4 Comparison
+
+| Parameter | HL7 v2 (MLLP) | FHIR R4 (REST) |
+|---|---|---|
+| **Transport** | TCP/MLLP (persistent socket) | HTTPS REST (stateless) |
+| **Message format** | Pipe-delimited HL7 v2.5 text | JSON or XML resource |
+| **Acknowledgement** | Synchronous ACK/NACK segment | HTTP 200 / 4xx / 5xx |
+| **Trigger** | Report finalized → `dispatch-report` job | Report finalized → `dispatch-report` job |
+| **Adapter class** | `Hl7Adapter` (`hl7-standard` lib) | `FhirAdapter` (`fhir.js` lib) |
+| **Config env vars** | `HL7_HOST`, `HL7_PORT`, `HL7_SENDING_APP`, `HL7_RECEIVING_APP` | `FHIR_SERVER_URL`, `FHIR_AUTH_TOKEN` |
+| **Enable/disable** | Set `HL7_ENABLED=true` | Set `FHIR_ENABLED=true` |
+| **Retry on failure** | BullMQ exponential backoff | BullMQ exponential backoff |
+| **Failure logging** | `audit_logs` table | `audit_logs` table |
+
+---
+
+## Error Handling and Retries
+
+Failed transmissions do not block the report finalization workflow. The report is marked `FINAL` in Mosaic regardless of downstream dispatch success. If a dispatch job fails (network timeout, ACK NACK, non-2xx HTTP response), BullMQ retries the job with exponential backoff up to a configurable maximum number of attempts (`HL7_MAX_RETRIES` / `FHIR_MAX_RETRIES`).
+
+Each attempt — successful or failed — is written to the `audit_logs` table with the outcome, error message (if any), and timestamp. You can query `audit_logs` filtered by `eventType = 'HL7_DISPATCH'` or `'FHIR_DISPATCH'` to investigate delivery issues.

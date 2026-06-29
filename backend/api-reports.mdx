@@ -1,0 +1,401 @@
+---
+title: "Reports API Endpoints: CRUD and Workflow Operations"
+sidebarTitle: "Reports Endpoints"
+description: "REST API reference for Mosaic Reporting report management: listing, creating, updating, finalizing, and retrieving version history for radiology reports."
+---
+
+The Reports API manages the full lifecycle of radiology reports in Mosaic — from initial creation against a worklist study through drafting, review, finalization, and amendment. Every PATCH to a report body creates an immutable version record, preserving the complete edit history.
+
+---
+
+## GET /api/v1/reports
+
+Returns a paginated list of reports. You can filter by status, assigned radiologist, study, date range, and more.
+
+### Query Parameters
+
+<ParamField query="status" type="string">
+  Filter by report status. One of: `DRAFT`, `PENDING_REVIEW`, `FINAL`, `AMENDED`.
+</ParamField>
+
+<ParamField query="assignedTo" type="string">
+  Filter by the ID of the assigned radiologist.
+</ParamField>
+
+<ParamField query="studyInstanceUID" type="string">
+  Filter by DICOM Study Instance UID.
+</ParamField>
+
+<ParamField query="dateFrom" type="string">
+  ISO 8601 date — return reports created on or after this date.
+</ParamField>
+
+<ParamField query="dateTo" type="string">
+  ISO 8601 date — return reports created on or before this date.
+</ParamField>
+
+<ParamField query="page" type="number" default="1">
+  Page number (1-indexed).
+</ParamField>
+
+<ParamField query="pageSize" type="number" default="25">
+  Number of results per page. Maximum 100.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="array">
+  Array of report summary objects. Each object includes `id`, `status`, `studyInstanceUID`, `assignedToId`, `createdAt`, `updatedAt`.
+</ResponseField>
+<ResponseField name="meta" type="object">
+  <Expandable title="meta">
+    <ResponseField name="page" type="number">Current page number.</ResponseField>
+    <ResponseField name="pageSize" type="number">Records per page.</ResponseField>
+    <ResponseField name="total" type="number">Total matching records across all pages.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl "https://api.mosaic.internal/api/v1/reports?status=DRAFT&page=1&pageSize=10" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": [
+    {
+      "id": "clrpt001abc",
+      "status": "DRAFT",
+      "studyInstanceUID": "1.2.840.10008.5.1.4.1.1.2",
+      "assignedToId": "clid123abc",
+      "createdAt": "2024-06-15T09:00:00.000Z",
+      "updatedAt": "2024-06-15T10:30:00.000Z"
+    }
+  ],
+  "meta": { "page": 1, "pageSize": 10, "total": 1 }
+}
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/v1/reports
+
+Creates a new report record linked to a worklist study. The report is created in `DRAFT` status. You may optionally specify a template to pre-populate the report body.
+
+### Request Body
+
+<ParamField body="studyInstanceUID" type="string" required>
+  The DICOM Study Instance UID of the study this report covers. Must correspond to an existing `WorklistStudy` record.
+</ParamField>
+
+<ParamField body="templateId" type="string">
+  Optional. The ID of a report template to use as the initial report body.
+</ParamField>
+
+<ParamField body="assignedTo" type="string">
+  Optional. The user ID of the radiologist to assign the report to. Defaults to the authenticated user if omitted.
+</ParamField>
+
+### Response — 201 Created
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  The newly created report object, including `id`, `status` (`DRAFT`), `body`, `studyInstanceUID`, `assignedToId`, `templateId`, `createdAt`, `updatedAt`.
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl -X POST https://api.mosaic.internal/api/v1/reports \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "studyInstanceUID": "1.2.840.10008.5.1.4.1.1.2",
+    "templateId": "cltpl456def",
+    "assignedTo": "clid123abc"
+  }'
+```
+
+```json Response 201
+{
+  "success": true,
+  "data": {
+    "id": "clrpt001abc",
+    "status": "DRAFT",
+    "studyInstanceUID": "1.2.840.10008.5.1.4.1.1.2",
+    "templateId": "cltpl456def",
+    "assignedToId": "clid123abc",
+    "body": "Clinical History:\n\nTechnique:\n\nFindings:\n\nImpression:",
+    "createdAt": "2024-06-15T09:00:00.000Z",
+    "updatedAt": "2024-06-15T09:00:00.000Z"
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## GET /api/v1/reports/:id
+
+Returns a single report with its full body content. The response also includes the associated study metadata.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique report ID.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  Full report object including `id`, `status`, `body`, `studyInstanceUID`, `assignedToId`, `templateId`, `createdAt`, `updatedAt`, and a nested `study` object with worklist study metadata.
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl https://api.mosaic.internal/api/v1/reports/clrpt001abc \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "id": "clrpt001abc",
+    "status": "DRAFT",
+    "body": "Clinical History: Cough x2 weeks.\n\nFindings: Lungs are clear.\n\nImpression: No acute process.",
+    "studyInstanceUID": "1.2.840.10008.5.1.4.1.1.2",
+    "assignedToId": "clid123abc",
+    "templateId": "cltpl456def",
+    "createdAt": "2024-06-15T09:00:00.000Z",
+    "updatedAt": "2024-06-15T10:30:00.000Z",
+    "study": {
+      "id": "clstd789ghi",
+      "accessionNumber": "ACC20240615001",
+      "patientName": "Doe, John A",
+      "modality": "CT",
+      "studyDate": "2024-06-15T08:00:00.000Z",
+      "priority": "ROUTINE"
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## PATCH /api/v1/reports/:id
+
+Updates the report body and/or assigned radiologist. Every successful PATCH creates a new immutable entry in `report_versions`, preserving the previous body. You can only PATCH reports in `DRAFT` or `PENDING_REVIEW` status.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique report ID.
+</ParamField>
+
+### Request Body
+
+<ParamField body="body" type="string">
+  The updated report body text. Replaces the current body; the old body is saved as a new version.
+</ParamField>
+
+<ParamField body="assignedTo" type="string">
+  The user ID of the radiologist to reassign the report to.
+</ParamField>
+
+<ParamField body="status" type="string">
+  Transition the status to `PENDING_REVIEW` (from `DRAFT`). Use the dedicated `/finalize` and `/amend` endpoints for terminal transitions.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  The updated report object with the new body and `updatedAt` timestamp.
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl -X PATCH https://api.mosaic.internal/api/v1/reports/clrpt001abc \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "body": "Clinical History: Cough x2 weeks.\n\nFindings: Lungs are clear bilaterally.\n\nImpression: No acute cardiopulmonary process."
+  }'
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "id": "clrpt001abc",
+    "status": "DRAFT",
+    "body": "Clinical History: Cough x2 weeks.\n\nFindings: Lungs are clear bilaterally.\n\nImpression: No acute cardiopulmonary process.",
+    "updatedAt": "2024-06-15T11:00:00.000Z"
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/v1/reports/:id/finalize
+
+Finalizes a report, transitioning its status from `DRAFT` or `PENDING_REVIEW` to `FINAL`. Finalization triggers downstream dispatch (HL7 and/or FHIR) if configured. You cannot PATCH a finalized report — use `/amend` instead.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique report ID.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  The updated report with `status: "FINAL"` and `updatedAt` timestamp.
+</ResponseField>
+
+### Response — 422 Unprocessable Entity
+
+Returns `REPORT_INVALID_TRANSITION` if the report is already `FINAL` or `AMENDED`.
+
+<CodeGroup>
+
+```bash Request
+curl -X POST https://api.mosaic.internal/api/v1/reports/clrpt001abc/finalize \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "id": "clrpt001abc",
+    "status": "FINAL",
+    "updatedAt": "2024-06-15T12:05:00.000Z"
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/v1/reports/:id/amend
+
+Opens a previously finalized report for amendment, transitioning status from `FINAL` to `AMENDED`. An amendment creates a new version record preserving the final body before changes. After amending, you may PATCH the body again; re-finalizing a second time is also supported.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique report ID.
+</ParamField>
+
+### Request Body
+
+<ParamField body="reason" type="string">
+  Optional. A brief reason for the amendment, stored in the version record.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="object">
+  The updated report with `status: "AMENDED"`.
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl -X POST https://api.mosaic.internal/api/v1/reports/clrpt001abc/amend \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "reason": "Correcting impression section per clinician request." }'
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "id": "clrpt001abc",
+    "status": "AMENDED",
+    "updatedAt": "2024-06-16T09:00:00.000Z"
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## GET /api/v1/reports/:id/versions
+
+Returns the complete version history for a report as an ordered list, most recent first. Each version record captures a full snapshot of the report body at the time of the save.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  The unique report ID.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">Always `true`.</ResponseField>
+<ResponseField name="data" type="array">
+  Array of version objects. Each includes `id`, `reportId`, `body`, `savedById` (user who saved), `createdAt`, and optional `reason` (for amendments).
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl https://api.mosaic.internal/api/v1/reports/clrpt001abc/versions \
+  -H "Authorization: Bearer <access_token>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": [
+    {
+      "id": "clver003",
+      "reportId": "clrpt001abc",
+      "body": "Clinical History: Cough x2 weeks.\n\nFindings: Lungs are clear bilaterally.\n\nImpression: No acute cardiopulmonary process.",
+      "savedById": "clid123abc",
+      "reason": null,
+      "createdAt": "2024-06-15T11:00:00.000Z"
+    },
+    {
+      "id": "clver002",
+      "reportId": "clrpt001abc",
+      "body": "Clinical History: Cough x2 weeks.\n\nFindings: Lungs are clear.\n\nImpression: No acute process.",
+      "savedById": "clid123abc",
+      "reason": null,
+      "createdAt": "2024-06-15T10:30:00.000Z"
+    },
+    {
+      "id": "clver001",
+      "reportId": "clrpt001abc",
+      "body": "Clinical History:\n\nTechnique:\n\nFindings:\n\nImpression:",
+      "savedById": "clid123abc",
+      "reason": null,
+      "createdAt": "2024-06-15T09:00:00.000Z"
+    }
+  ]
+}
+```
+
+</CodeGroup>

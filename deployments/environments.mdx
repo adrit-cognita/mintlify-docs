@@ -1,0 +1,119 @@
+---
+title: "Environment Topology: Dev, Staging, and Production"
+sidebarTitle: "Environments"
+description: "Configuration differences across Mosaic Reporting's dev, staging, and production environments: infrastructure sizing, URLs, scaling, and PHI data policies."
+---
+
+Mosaic Reporting operates across three environments that form a promotion path from individual developer machines to the live clinical platform. Each environment is isolated — it uses its own database, its own Redis instance, and its own set of secrets. Understanding the purpose and constraints of each environment helps you make the right decisions about where to test, what data to use, and how deployments are triggered.
+
+<Warning>
+  The production environment contains real patient health information (PHI) and is subject to HIPAA requirements. Access is restricted to authorized personnel only. Never copy production data to staging or development environments. Never run ad-hoc queries against the production database without explicit approval and an audit trail.
+</Warning>
+
+## Environment Comparison
+
+| Property | Development | Staging | Production |
+|----------|------------|---------|-----------|
+| **Purpose** | Feature development and debugging | QA, integration testing, release validation | Live clinical reporting |
+| **Frontend URL** | `http://localhost:5173` | `https://staging.mosaic.internal` | `https://mosaic.yourorg.com` |
+| **Backend API URL** | `http://localhost:3000` | `https://api.staging.mosaic.internal` | `https://api.mosaic.yourorg.com` |
+| **DICOM Viewer URL** | `http://localhost:3001` | `https://viewer.staging.mosaic.internal` | `https://viewer.mosaic.yourorg.com` |
+| **Backend replicas** | 1 (local process) | 1–2 ECS tasks | 2–10 ECS tasks (auto-scaling) |
+| **Database** | Local Docker PostgreSQL | RDS `db.t3.medium` | RDS `db.r6g.large` Multi-AZ |
+| **Redis** | Local Docker Redis | ElastiCache single node | ElastiCache cluster (3 shards) |
+| **PACS integration** | Local DICOM simulator | Test PACS (no patient data) | Live PACS (real studies) |
+| **EMR / RIS integration** | Stub / mock server | Test EMR instance | Live EMR / RIS |
+| **PHI data** | No — synthetic only | No — synthetic / de-identified | Yes — real patient data |
+| **Deploy trigger** | Manual (`pnpm dev`) | Automatic on every merge to `staging` | Manual trigger or scheduled release |
+| **Secret source** | `.env` file | AWS Secrets Manager (staging secrets) | AWS Secrets Manager (production secrets) |
+| **Monitoring** | Console logs only | CloudWatch Logs, Sentry (non-prod) | Full stack: CloudWatch, Prometheus, Sentry, PagerDuty |
+
+## Development Environment
+
+The development environment runs entirely on a developer's local machine. No cloud infrastructure is involved, which means iteration is fast and there is no cost associated with development activity.
+
+<Note>
+  Use `docker compose up -d` to start the local PostgreSQL and Redis containers before running the backend. The `docker-compose.yml` in the repository root pre-configures both services with the credentials matching the `.env.example` defaults.
+</Note>
+
+### Starting the Development Environment
+
+```bash
+# 1. Start local PostgreSQL and Redis
+docker compose up -d
+
+# 2. Apply any pending migrations to the local database
+pnpm prisma migrate dev
+
+# 3. Seed the database with test data (optional)
+pnpm prisma db seed
+
+# 4. Start the backend in watch mode
+pnpm dev
+
+# 5. In a separate terminal, start the frontend dev server
+cd frontend && pnpm dev
+```
+
+The backend starts on port `3000` with hot-reload via `ts-node-dev` (or `tsx --watch`). The frontend dev server starts on port `5173` and proxies API requests to `localhost:3000` as configured in `vite.config.ts`.
+
+### `docker-compose.yml` Overview
+
+```yaml
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: mosaic_dev
+      POSTGRES_USER: mosaic
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
+```
+
+## Staging Environment
+
+Staging mirrors the production topology at reduced scale. It is the gating environment before any change reaches production — if something breaks in staging, it does not affect clinical users.
+
+**When to use staging:**
+- Manual QA of new features before a production release.
+- Integration testing of PACS or EMR configuration changes.
+- Load testing and performance profiling (use a dedicated load-test dataset).
+- Demonstrating features to stakeholders before go-live.
+
+**Staging data policy:** Staging uses synthetic patient data or de-identified records approved by your data governance team. The staging PACS and EMR instances contain no real patient studies. Do not use real DICOM studies or real patient names in staging.
+
+**Deployment cadence:** Every merge to the `staging` git branch automatically triggers a CI/CD pipeline run that builds, tests, and deploys to the staging environment. Staging is always running the latest code from the `staging` branch.
+
+## Production Environment
+
+Production is the environment that serves clinical users. It runs with full high-availability configuration: Multi-AZ database, multiple backend replicas, and real integrations to the live PACS and EMR systems.
+
+**PHI handling:** All activity in production is subject to your organization's HIPAA policies. Database access requires VPN connectivity and is logged. Direct SQL queries against the production RDS instance require a change approval ticket and must be reviewed post-execution.
+
+**Deployment cadence:** Production deployments are triggered manually from the GitHub Actions UI (using the workflow dispatch trigger) or on a pre-announced release schedule. This gives the team control over when production changes take effect and allows scheduling deployments during low-traffic windows.
+
+**Rollback:** If a production deployment introduces a regression, roll back by promoting the previous Vercel deployment (frontend) and by updating the ECS service to the previous task definition revision (backend). Database migrations that have already been applied cannot be automatically rolled back — forward-only rollback migrations must be prepared before deploying any schema-breaking change.
+
+## Environment URLs Reference
+
+| Environment | Frontend | Backend API | DICOM Viewer |
+|-------------|---------|-------------|-------------|
+| Development | `http://localhost:5173` | `http://localhost:3000` | `http://localhost:3001` |
+| Staging | `https://staging.mosaic.internal` | `https://api.staging.mosaic.internal` | `https://viewer.staging.mosaic.internal` |
+| Production | `https://mosaic.yourorg.com` | `https://api.mosaic.yourorg.com` | `https://viewer.mosaic.yourorg.com` |
+
+Staging URLs are on an internal domain (`.internal`) accessible only over VPN. Production URLs are public-facing but protected by authentication — unauthenticated requests to the API return `401 Unauthorized`.

@@ -1,0 +1,171 @@
+---
+title: "Frontend Environment Variables and Build Configuration"
+sidebarTitle: "Environment"
+description: "All Vite environment variables used by the Mosaic Reporting frontend, including API base URL, DICOM viewer URL, and feature flags."
+---
+
+The Mosaic Reporting frontend uses Vite's built-in environment variable system to configure runtime behavior across development, staging, and production without code changes. Every variable must be prefixed with `VITE_` — Vite strips all other environment variables from the client bundle at build time for security reasons.
+
+## Environment Files
+
+Variables are defined in plain `.env` files at the root of the frontend package. Vite loads them in the following priority order (highest wins):
+
+<Steps>
+  <Step title=".env.local">
+    Local machine overrides. Never committed to source control. Use this file for personal development values.
+  </Step>
+  <Step title=".env.[mode]">
+    Environment-specific values: `.env.development`, `.env.staging`, or `.env.production`. Committed to the repository with safe placeholder values.
+  </Step>
+  <Step title=".env">
+    Shared defaults that apply to all environments. Keep only non-sensitive, truly universal values here.
+  </Step>
+</Steps>
+
+You select the active mode with the `--mode` flag:
+
+```bash
+# Development (default for `vite dev`)
+vite dev
+
+# Staging build
+vite build --mode staging
+
+# Production build
+vite build --mode production
+```
+
+## Variable Reference
+
+| Variable | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `VITE_API_BASE_URL` | `string` (URL) | — | ✅ Yes | Base URL for the backend REST API, e.g. `https://api.mosaic.internal`. All `apiClient` requests are prefixed with this value. |
+| `VITE_DICOM_VIEWER_URL` | `string` (URL) | — | ✅ Yes | Full URL of the embedded DICOM viewer iframe, e.g. `https://viewer.mosaic.internal`. |
+| `VITE_DICOM_VIEWER_ORIGIN` | `string` (origin) | — | ✅ Yes | Allowed origin for `postMessage` communication with the DICOM viewer. Must exactly match the origin of `VITE_DICOM_VIEWER_URL` (scheme + host + port, no trailing slash). |
+| `VITE_APP_ENV` | `"development"` \| `"staging"` \| `"production"` | `"development"` | ✅ Yes | Logical environment name. Used in logging, Sentry event tags, and conditional feature behavior. |
+| `VITE_SENTRY_DSN` | `string` (DSN) | `""` (disabled) | No | Sentry DSN for frontend error tracking. Leave empty in development to silence Sentry entirely. |
+| `VITE_POLLING_INTERVAL_MS` | `number` | `60000` | No | How often (in milliseconds) the worklist polls for updates. Increase in low-traffic environments to reduce backend load. |
+| `VITE_FEATURE_FLAG_AMENDMENTS` | `"true"` \| `"false"` | `"false"` | No | Enables the report amendment workflow UI. Set to `"true"` in staging/production once the feature is ready to roll out. |
+
+### Variable Details
+
+<Accordion title="VITE_API_BASE_URL">
+  The base URL is passed directly to Axios as `baseURL`. Do not include a trailing slash — the API functions in `src/api/` assume paths start with `/`.
+
+  **Examples:**
+  - Development: `http://localhost:8080`
+  - Staging: `https://api.staging.mosaic.internal`
+  - Production: `https://api.mosaic.internal`
+</Accordion>
+
+<Accordion title="VITE_DICOM_VIEWER_URL and VITE_DICOM_VIEWER_ORIGIN">
+  These two variables work together. `VITE_DICOM_VIEWER_URL` is the `src` attribute of the viewer `<iframe>`. `VITE_DICOM_VIEWER_ORIGIN` is used as the `targetOrigin` argument in every `window.postMessage()` call to the viewer, and as the expected origin when validating incoming messages.
+
+  They must match. If your viewer is at `https://viewer.mosaic.internal/app`, then:
+  - `VITE_DICOM_VIEWER_URL=https://viewer.mosaic.internal/app`
+  - `VITE_DICOM_VIEWER_ORIGIN=https://viewer.mosaic.internal`
+</Accordion>
+
+<Accordion title="VITE_SENTRY_DSN">
+  When set to a non-empty string, the Sentry SDK initializes on app startup. The `VITE_APP_ENV` value is automatically attached as the Sentry `environment` tag.
+
+  If `VITE_SENTRY_DSN` is empty or absent, Sentry is not initialized and no errors are reported. This is the recommended setting for local development.
+</Accordion>
+
+<Accordion title="VITE_POLLING_INTERVAL_MS">
+  The worklist uses React Query's `refetchInterval` option. This variable controls the interval:
+
+  ```ts
+  useQuery({
+    queryKey: ['worklist', filters],
+    queryFn: () => fetchWorklist(filters),
+    refetchInterval: Number(import.meta.env.VITE_POLLING_INTERVAL_MS) || 60_000,
+  });
+  ```
+
+  Setting this to `0` disables polling entirely. For development you may want `10000` (10 s) to see updates quickly without hammering the backend.
+</Accordion>
+
+<Accordion title="VITE_FEATURE_FLAG_AMENDMENTS">
+  Read this flag in code with a typed helper rather than accessing `import.meta.env` directly:
+
+  ```ts
+  // src/lib/featureFlags.ts
+  export const featureFlags = {
+    amendments: import.meta.env.VITE_FEATURE_FLAG_AMENDMENTS === 'true',
+  } as const;
+  ```
+
+  Then use it in components:
+
+  ```tsx
+  import { featureFlags } from '@/lib/featureFlags';
+
+  {featureFlags.amendments && <AmendmentButton reportId={reportId} />}
+  ```
+</Accordion>
+
+## Sample `.env.development` File
+
+Use this as a starting point when setting up a local development environment. Copy it to `.env.local` and fill in any values specific to your machine.
+
+```ini
+# .env.development
+# ─────────────────────────────────────────────────────────────────────────────
+# Mosaic Reporting — development environment variables
+# Copy to .env.local and override values as needed for your local setup.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Backend API
+VITE_API_BASE_URL=http://localhost:8080
+
+# DICOM Viewer
+VITE_DICOM_VIEWER_URL=http://localhost:3001
+VITE_DICOM_VIEWER_ORIGIN=http://localhost:3001
+
+# App environment
+VITE_APP_ENV=development
+
+# Sentry — leave empty in development to disable error reporting
+VITE_SENTRY_DSN=
+
+# Worklist polling — 10 s in development for faster feedback
+VITE_POLLING_INTERVAL_MS=10000
+
+# Feature flags
+VITE_FEATURE_FLAG_AMENDMENTS=true
+```
+
+## Accessing Variables in Code
+
+Use `import.meta.env` to read any `VITE_`-prefixed variable. Vite replaces these references at build time with the literal string values, so there is no runtime environment lookup:
+
+```ts
+const baseUrl = import.meta.env.VITE_API_BASE_URL;
+const isDev = import.meta.env.VITE_APP_ENV === 'development';
+```
+
+For type safety, extend Vite's `ImportMetaEnv` interface in `src/vite-env.d.ts`:
+
+```ts
+// src/vite-env.d.ts
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_API_BASE_URL: string;
+  readonly VITE_DICOM_VIEWER_URL: string;
+  readonly VITE_DICOM_VIEWER_ORIGIN: string;
+  readonly VITE_APP_ENV: 'development' | 'staging' | 'production';
+  readonly VITE_SENTRY_DSN: string;
+  readonly VITE_POLLING_INTERVAL_MS: string;
+  readonly VITE_FEATURE_FLAG_AMENDMENTS: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+```
+
+<Note>
+  Never commit real API keys, DSNs, or secrets to source control — even in `.env.production`. Use your CI/CD pipeline's secrets injection (e.g., GitHub Actions secrets, GitLab CI variables) to populate sensitive values at build time. The `.env.*` files in the repository should contain only placeholder values or safe defaults.
+</Note>

@@ -1,0 +1,150 @@
+---
+title: "Monitoring, Observability, and Alerting for Mosaic Reporting"
+sidebarTitle: "Monitoring"
+description: "Mosaic Reporting's observability stack: structured logging, Prometheus metrics, distributed tracing, Sentry error capture, and PagerDuty alerting setup."
+---
+
+Mosaic Reporting follows a four-pillar observability model: logs, metrics, traces, and error tracking. Together these give you the ability to detect problems proactively (via alerts), investigate them quickly (via correlated logs and traces), and understand system health over time (via dashboards). This page describes the tools, instrumentation, and alert thresholds for each pillar.
+
+<CardGroup cols={2}>
+  <Card title="Logs" icon="file-lines">
+    Structured JSON logs from the backend via **Winston**, shipped to CloudWatch Logs or Datadog. Every log line includes a `requestId`, `userId`, `level`, `message`, and `timestamp` field for correlation.
+  </Card>
+  <Card title="Metrics" icon="chart-bar">
+    Application metrics exposed via a **Prometheus client** library. The metrics endpoint is scraped by Prometheus (or the Datadog Agent) every 15 seconds. Dashboards in Grafana or Datadog visualize request rates, latency, and queue depths in real time.
+  </Card>
+  <Card title="Traces" icon="diagram-project">
+    Distributed traces collected with the **OpenTelemetry SDK**. Every inbound HTTP request generates a trace that spans the route handler, Prisma database call, and any Redis or BullMQ operations. Traces are exported to Jaeger or Datadog APM.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation">
+    Frontend and backend exceptions captured by **Sentry**. Sentry groups errors by stack trace, tracks deployment release versions, and notifies the team when a new error type appears in production.
+  </Card>
+</CardGroup>
+
+## Logging
+
+The backend uses **Winston** configured to emit structured JSON on every log call. Log levels follow the standard hierarchy: `error`, `warn`, `info`, `http`, `debug`. Only `info` and above are emitted in production.
+
+Every HTTP request is logged by a middleware layer that records:
+
+```json
+{
+  "level": "info",
+  "message": "HTTP request completed",
+  "method": "GET",
+  "path": "/api/v1/reports",
+  "statusCode": 200,
+  "durationMs": 42,
+  "requestId": "req_01HXK8R3YZABCD1234",
+  "userId": "usr_9a3f2e1c",
+  "timestamp": "2024-11-14T10:23:41.012Z"
+}
+```
+
+Logs are shipped to **CloudWatch Logs** via the ECS `awslogs` log driver (configured in the task definition) or to **Datadog** using the Datadog log forwarder Lambda. Log groups are organized by environment: `/ecs/mosaic-api/production`.
+
+## Metrics
+
+The backend registers Prometheus metrics using `prom-client`. Metrics are exposed at `GET /metrics` (accessible only within the VPC — not through the public ALB). The Prometheus scrape interval is 15 seconds.
+
+### Instrumented Metrics
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `http_request_duration_seconds` | Histogram | HTTP request latency, labeled by `method`, `route`, `status_code` |
+| `http_requests_total` | Counter | Total HTTP requests, labeled by `method`, `route`, `status_code` |
+| `db_query_duration_seconds` | Histogram | PostgreSQL query latency via Prisma middleware |
+| `bullmq_jobs_total` | Counter | BullMQ jobs processed, labeled by `queue`, `status` |
+| `bullmq_queue_depth` | Gauge | Number of waiting jobs per BullMQ queue |
+| `redis_commands_total` | Counter | Redis commands executed, labeled by `command` |
+| `pgbouncer_pool_size` | Gauge | PgBouncer active connection pool utilization |
+| `report_created_total` | Counter | Reports created, labeled by `modality`, `status` |
+| `report_finalized_total` | Counter | Reports finalized and signed |
+
+## Distributed Tracing
+
+The backend is instrumented with the **OpenTelemetry Node.js SDK**. Auto-instrumentation patches Express, Prisma, Redis, and HTTP clients automatically. Manual spans are added for business-critical operations like report creation and DICOM retrieval.
+
+Trace context propagates across service boundaries via the `traceparent` HTTP header (W3C Trace Context standard). When the backend makes an outbound HTTP call to a FHIR server or PACS management endpoint, the trace context is forwarded so that cross-service latency is visible in a single trace.
+
+Traces are exported to **Jaeger** (via OTLP gRPC) or **Datadog APM** (via the Datadog agent's OTLP receiver). Sampling rate in production is 10% for normal traffic and 100% for error traces.
+
+## Frontend Error Tracking (Sentry)
+
+The Vite frontend is instrumented with the Sentry React SDK:
+
+```typescript
+Sentry.init({
+  dsn: import.meta.env.VITE_SENTRY_DSN,
+  environment: import.meta.env.VITE_APP_ENV,
+  release: `mosaic-frontend@${import.meta.env.VITE_APP_VERSION}`,
+  tracesSampleRate: 0.1,
+  replaysOnErrorSampleRate: 1.0,
+  integrations: [
+    Sentry.browserTracingIntegration(),
+    Sentry.replayIntegration(),
+  ],
+});
+```
+
+Sentry captures:
+- Unhandled JavaScript exceptions and rejected Promises.
+- React component render errors (via the error boundary).
+- Network request failures (4xx and 5xx responses to the API).
+- Core Web Vitals via the browser tracing integration.
+
+## Alerting
+
+Alerts are routed to **PagerDuty** (or Opsgenie) and trigger on-call notifications for the engineering team. All alerts have a 5-minute evaluation window before firing to suppress transient spikes.
+
+### Alert Thresholds
+
+| Alert | Source | Threshold | Severity |
+|-------|--------|-----------|---------|
+| High 5xx error rate | Prometheus `http_requests_total` | > 1% of requests return 5xx for 5 min | Critical |
+| P99 API latency | Prometheus `http_request_duration_seconds` | P99 > 2 000 ms for 5 min | Critical |
+| P95 API latency | Prometheus `http_request_duration_seconds` | P95 > 1 000 ms for 10 min | Warning |
+| Database connection failures | Prometheus / health check | Any DB connection error for 1 min | Critical |
+| PgBouncer pool exhaustion | Prometheus `pgbouncer_pool_size` | > 90% pool utilization for 3 min | Warning |
+| BullMQ stalled jobs | Prometheus `bullmq_jobs_total{status="stalled"}` | > 0 stalled jobs for 5 min | Warning |
+| BullMQ queue backlog | Prometheus `bullmq_queue_depth` | > 500 waiting jobs for 10 min | Warning |
+| Redis memory utilization | CloudWatch / Datadog | > 80% `maxmemory` for 5 min | Warning |
+| ECS task health check failures | ALB target group | Unhealthy targets > 0 for 2 min | Critical |
+| Sentry error volume spike | Sentry | New error type or > 100 events/min | Warning |
+
+### Metric Summary Table
+
+| Metric | Source | Alert Threshold |
+|--------|--------|----------------|
+| HTTP request rate | Prometheus | — (informational) |
+| P95 latency | Prometheus | > 1 000 ms |
+| P99 latency | Prometheus | > 2 000 ms |
+| 5xx error rate | Prometheus | > 1% |
+| Report creation rate | Prometheus | — (informational) |
+| Report finalization rate | Prometheus | — (informational) |
+| Worklist queue depth | Prometheus | > 500 waiting jobs |
+| BullMQ job failure rate | Prometheus | > 0 stalled jobs |
+| PostgreSQL pool utilization | Prometheus / PgBouncer | > 90% |
+| Redis memory utilization | CloudWatch | > 80% of `maxmemory` |
+| Frontend error rate | Sentry | New error type or spike |
+
+## Health Check
+
+The ALB polls `GET /health` on each backend container every **30 seconds**. A container that fails 3 consecutive checks (90 seconds) is marked unhealthy, removed from the target group, and replaced by a new task.
+
+The health endpoint response includes subsystem status to help distinguish application bugs from infrastructure failures:
+
+```json
+{
+  "status": "ok",
+  "version": "1.4.2",
+  "uptime": 382410,
+  "checks": {
+    "database": "ok",
+    "redis": "ok",
+    "bullmq": "ok"
+  }
+}
+```
+
+If any subsystem check fails, the overall `status` is `"degraded"` and the response code is `503`, triggering ALB health check failure.

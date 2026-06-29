@@ -1,0 +1,146 @@
+{
+  "projectType": "saas",
+  "projectName": "Mosaic Reporting",
+  "projectDescription": "Mosaic Reporting is an internal radiology reporting platform that streamlines the creation, review, and management of diagnostic imaging reports across frontend and backend services.",
+  "theme": "maple",
+  "primaryColor": "#ef7025",
+  "lightColor": "#eec9bc",
+  "darkColor": "#4fa1ab",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Frontend",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "frontend/introduction",
+              "frontend/architecture"
+            ]
+          },
+          {
+            "group": "Core Subsystems",
+            "pages": [
+              "frontend/auth",
+              "frontend/report-editor",
+              "frontend/worklist",
+              "frontend/viewer-integration",
+              "frontend/templates"
+            ]
+          },
+          {
+            "group": "State & Data",
+            "pages": [
+              "frontend/state-management",
+              "frontend/api-client",
+              "frontend/routing"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "frontend/environment",
+              "frontend/theming"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Backend",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "backend/introduction",
+              "backend/architecture"
+            ]
+          },
+          {
+            "group": "Core Subsystems",
+            "pages": [
+              "backend/auth-service",
+              "backend/report-service",
+              "backend/worklist-service",
+              "backend/template-service",
+              "backend/notification-service"
+            ]
+          },
+          {
+            "group": "Data & Integrations",
+            "pages": [
+              "backend/database",
+              "backend/dicom-integration",
+              "backend/hl7-fhir"
+            ]
+          },
+          {
+            "group": "API Reference",
+            "pages": [
+              "backend/api-overview",
+              "backend/api-auth",
+              "backend/api-reports",
+              "backend/api-worklist"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Deployments",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "deployments/introduction",
+              "deployments/architecture"
+            ]
+          },
+          {
+            "group": "Frontend Infrastructure",
+            "pages": [
+              "deployments/frontend-hosting",
+              "deployments/cdn-config",
+              "deployments/frontend-ci-cd"
+            ]
+          },
+          {
+            "group": "Backend Infrastructure",
+            "pages": [
+              "deployments/backend-hosting",
+              "deployments/database-infra",
+              "deployments/backend-ci-cd"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "deployments/monitoring",
+              "deployments/secrets-config",
+              "deployments/environments"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Structured radiology report authoring with customizable templates",
+    "Integrated DICOM viewer for image review alongside reporting",
+    "Worklist management for tracking pending and completed studies",
+    "HL7/FHIR integration for EMR/RIS interoperability",
+    "Role-based access control for radiologists, residents, and technologists",
+    "Real-time notifications for report status changes",
+    "Audit trail and report versioning",
+    "Multi-environment deployment (dev, staging, production)"
+  ],
+  "publicApiSurface": [
+    "POST /api/auth/login",
+    "GET /api/reports",
+    "POST /api/reports",
+    "GET /api/reports/:id",
+    "PUT /api/reports/:id",
+    "GET /api/worklist",
+    "GET /api/templates",
+    "POST /api/templates",
+    "GET /api/notifications"
+  ]
+}

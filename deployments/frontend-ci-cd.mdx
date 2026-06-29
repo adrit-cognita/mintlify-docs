@@ -1,0 +1,193 @@
+---
+title: "Frontend CI/CD Pipeline: Build, Test, and Deploy Flow"
+sidebarTitle: "Frontend CI/CD"
+description: "The GitHub Actions CI/CD pipeline for the Mosaic Reporting frontend: linting, testing, building, and deploying to staging and production environments."
+---
+
+Every change to the Mosaic Reporting frontend travels through a GitHub Actions pipeline before reaching users. The pipeline enforces code quality gates — linting, type checking, and unit tests — on every pull request, and then extends those gates with a build and deploy step when changes land on the `staging` or `main` branch. No manual steps are required to ship a frontend change after a PR is merged.
+
+## Trigger Strategy
+
+<Note>
+  The pipeline uses **branch-based promotion**: merging to `staging` deploys to the staging environment and merging to `main` deploys to production. Pull requests run only the quality gates (lint, type check, tests) without performing any deployment — this keeps PR feedback fast and avoids polluting environments with unreviewed code.
+</Note>
+
+| Git Event | Environments Affected | Actions Run |
+|-----------|----------------------|-------------|
+| Pull request opened / updated | None | Checkout → Install → Lint → Type check → Test |
+| Push to `staging` branch | Staging | All quality gates + Build + Deploy to staging |
+| Push to `main` branch | Production | All quality gates + Build + Deploy to production |
+
+## Pipeline Stages
+
+<Steps>
+  <Step title="Checkout Code">
+    GitHub Actions checks out the repository at the commit that triggered the workflow. The `fetch-depth: 0` option is used so that version tooling can inspect git history when needed.
+
+    ```yaml
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    ```
+  </Step>
+  <Step title="Install Dependencies">
+    Dependencies are installed using `pnpm install --frozen-lockfile` to guarantee that the exact versions recorded in `pnpm-lock.yaml` are used. The `pnpm` cache is restored from GitHub's cache service to avoid repeated network downloads.
+
+    ```yaml
+    - uses: pnpm/action-setup@v3
+      with:
+        version: 9
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: pnpm
+    - run: pnpm install --frozen-lockfile
+    ```
+  </Step>
+  <Step title="Lint">
+    ESLint checks all TypeScript and TSX source files for style and correctness issues. The pipeline fails immediately if any lint error is reported.
+
+    ```bash
+    pnpm lint
+    ```
+  </Step>
+  <Step title="Type Check">
+    The TypeScript compiler runs in no-emit mode to surface type errors without producing output files. This is separate from the build step so that type errors are reported early and clearly.
+
+    ```bash
+    pnpm tsc --noEmit
+    ```
+  </Step>
+  <Step title="Unit Tests">
+    Vitest runs the full unit test suite. Code coverage is collected and uploaded to Codecov (or your equivalent coverage service). The pipeline fails if any test fails or if coverage drops below the configured threshold.
+
+    ```bash
+    pnpm test --coverage
+    ```
+  </Step>
+  <Step title="Build">
+    Vite produces the production-optimized static bundle in `dist/`. Environment variables appropriate for the target environment (`staging` or `production`) are injected via GitHub Actions secrets and passed to the build command.
+
+    ```bash
+    pnpm build
+    ```
+  </Step>
+  <Step title="Deploy to Vercel">
+    The compiled `dist/` directory is deployed to Vercel using the Vercel CLI. The `--prod` flag promotes the deployment to the production alias (for the `main` branch); omitting `--prod` creates a preview deployment on the staging URL.
+
+    ```bash
+    # Production (main branch)
+    vercel deploy --prod --token=$VERCEL_TOKEN
+
+    # Staging (staging branch)
+    vercel deploy --token=$VERCEL_TOKEN \
+      --env VITE_APP_ENV=staging
+    ```
+  </Step>
+</Steps>
+
+## Full Workflow YAML
+
+```yaml
+name: Frontend CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+  pull_request:
+    branches:
+      - main
+      - staging
+
+jobs:
+  quality:
+    name: Lint, Type Check, and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm tsc --noEmit
+
+      - name: Unit tests
+        run: pnpm test --coverage
+
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    needs: quality
+    if: github.event_name == 'push'
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+        env:
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+          VITE_DICOM_VIEWER_URL: ${{ secrets.VITE_DICOM_VIEWER_URL }}
+          VITE_APP_ENV: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+
+      - name: Deploy to Vercel
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            vercel deploy --prod --token=$VERCEL_TOKEN
+          else
+            vercel deploy --token=$VERCEL_TOKEN
+          fi
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+```
+
+## Environment Variables and Secrets
+
+Store the following secrets in the GitHub repository's **Settings → Secrets and variables → Actions**:
+
+| Secret Name | Description |
+|-------------|-------------|
+| `VERCEL_TOKEN` | Vercel personal access token with deploy permissions |
+| `VERCEL_ORG_ID` | Vercel organization or team ID |
+| `VERCEL_PROJECT_ID` | Vercel project ID for the frontend |
+| `VITE_API_BASE_URL` | Backend API base URL for the target environment |
+| `VITE_SENTRY_DSN` | Sentry DSN for frontend error tracking |
+| `VITE_DICOM_VIEWER_URL` | DICOM viewer base URL |
+
+Use GitHub Actions **Environments** (`staging` and `production`) to scope secrets to the correct deployment target. Environment-specific secrets override repository-level secrets of the same name.
+
+## Rollback
+
+To roll back a production frontend deployment, re-promote the previous Vercel deployment from the Vercel dashboard using the **Promote to Production** option. This is instantaneous — Vercel swaps the production alias back to the previous build with no rebuild required.

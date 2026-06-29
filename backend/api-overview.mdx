@@ -1,0 +1,158 @@
+---
+title: "API Overview: REST Conventions and Response Envelope"
+sidebarTitle: "API Overview"
+description: "Overview of the Mosaic Reporting internal REST API: base URL, authentication, versioning, request/response conventions, and standard error codes."
+---
+
+The Mosaic Reporting backend exposes a versioned internal REST API used by the frontend application, background workers, and any internal tooling. All endpoints follow consistent conventions for authentication, request formatting, response structure, and error signalling — familiarize yourself with this page before working with any individual endpoint group.
+
+---
+
+## Base URL
+
+```text
+https://api.mosaic.internal/api/v1
+```
+
+All paths in this documentation are relative to this base URL. The version segment (`/v1`) is part of the URL path; breaking changes to the API contract will increment this to `/v2`, with the previous version remaining available during a deprecation window.
+
+---
+
+## Authentication
+
+Every endpoint except `POST /auth/login` requires a valid access token. Include the token in the `Authorization` header using the **Bearer** scheme:
+
+```http
+Authorization: Bearer <access_token>
+```
+
+Access tokens are short-lived (15 minutes by default). Use `POST /auth/refresh` to obtain a new access token from the HttpOnly refresh token cookie before the current one expires. See [Auth Endpoints](/backend/api-auth) for the full authentication flow.
+
+---
+
+## Content Type
+
+All requests that include a body must send `Content-Type: application/json`. All responses are returned as `application/json`. Requests with malformed JSON bodies are rejected with a `400 VALIDATION_ERROR`.
+
+---
+
+## Response Envelope
+
+Every successful response is wrapped in a standard JSON envelope:
+
+```json
+{
+  "success": true,
+  "data": { },
+  "meta": {
+    "page": 1,
+    "pageSize": 25,
+    "total": 120
+  }
+}
+```
+
+- **`success`** — always `true` for successful responses.
+- **`data`** — the primary response payload; a single object for resource endpoints, an array for list endpoints.
+- **`meta`** — present only on paginated list responses; contains `page`, `pageSize`, and `total` (total matching records across all pages).
+
+Non-paginated responses omit the `meta` field entirely.
+
+---
+
+## Error Envelope
+
+All errors follow a consistent structure. The HTTP status code and the `error.code` field together give you everything you need to handle the error programmatically:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "REPORT_NOT_FOUND",
+    "message": "Report with id abc123 was not found.",
+    "statusCode": 404
+  }
+}
+```
+
+- **`success`** — always `false` for error responses.
+- **`error.code`** — machine-readable error code (see table below).
+- **`error.message`** — human-readable description for debugging; do not display raw to end users.
+- **`error.statusCode`** — mirrors the HTTP response status code.
+
+---
+
+## Standard Error Codes
+
+| Code | HTTP Status | Description |
+|---|---|---|
+| `AUTH_INVALID_CREDENTIALS` | 401 | The email/password combination is incorrect. |
+| `AUTH_TOKEN_EXPIRED` | 401 | The access or refresh token has expired; re-authenticate. |
+| `AUTH_UNAUTHORIZED` | 403 | The authenticated user does not have permission to perform this action. |
+| `REPORT_NOT_FOUND` | 404 | No report exists with the given ID. |
+| `REPORT_INVALID_TRANSITION` | 422 | The requested status transition is not allowed (e.g., finalizing an already-final report). |
+| `STUDY_ALREADY_CLAIMED` | 409 | The worklist study is already claimed by another user. |
+| `TEMPLATE_NOT_FOUND` | 404 | No template exists with the given ID. |
+| `VALIDATION_ERROR` | 400 | One or more request fields failed validation; check `error.message` for details. |
+
+---
+
+## Rate Limiting
+
+The API enforces a rate limit of **1,000 requests per minute per authenticated user**. Requests that exceed this limit receive a `429 Too Many Requests` response with a `Retry-After` header indicating when the limit resets.
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 23
+Content-Type: application/json
+
+{
+  "success": false,
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Rate limit of 1000 requests/minute exceeded. Retry after 23 seconds.",
+    "statusCode": 429
+  }
+}
+```
+
+---
+
+## Endpoint Summary
+
+The table below lists every available endpoint across all resource groups.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/auth/login` | Authenticate and receive an access token |
+| `POST` | `/auth/logout` | Revoke the current session |
+| `POST` | `/auth/refresh` | Exchange a refresh token cookie for a new access token |
+| `GET` | `/auth/me` | Get the currently authenticated user's profile |
+| `GET` | `/reports` | List reports with optional filters |
+| `POST` | `/reports` | Create a new report |
+| `GET` | `/reports/:id` | Get a single report by ID |
+| `PATCH` | `/reports/:id` | Update report body or fields |
+| `POST` | `/reports/:id/finalize` | Finalize a report (transitions to `FINAL`) |
+| `POST` | `/reports/:id/amend` | Amend a finalized report (transitions to `AMENDED`) |
+| `GET` | `/reports/:id/versions` | List version history for a report |
+| `GET` | `/worklist` | List worklist studies with filters |
+| `GET` | `/worklist/:id` | Get a single worklist study |
+| `PATCH` | `/worklist/:id/claim` | Claim a study for reporting |
+| `PATCH` | `/worklist/:id/release` | Release a claimed study back to the pool |
+| `PATCH` | `/worklist/:id/complete` | Mark a study as complete |
+
+---
+
+## Endpoint Group References
+
+<CardGroup cols={3}>
+  <Card title="Auth Endpoints" icon="lock" href="/backend/api-auth">
+    Login, logout, token refresh, and current user profile.
+  </Card>
+  <Card title="Reports Endpoints" icon="file-medical" href="/backend/api-reports">
+    Create, update, finalize, amend, and retrieve version history for reports.
+  </Card>
+  <Card title="Worklist Endpoints" icon="list" href="/backend/api-worklist">
+    List studies, claim, release, and complete worklist items.
+  </Card>
+</CardGroup>

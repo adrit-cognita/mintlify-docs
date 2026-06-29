@@ -1,0 +1,321 @@
+---
+title: "Backend CI/CD Pipeline: Build, Test, and Container Deploy"
+sidebarTitle: "Backend CI/CD"
+description: "The GitHub Actions CI/CD pipeline for the Mosaic Reporting backend: testing, Docker image build, ECR push, and ECS or Kubernetes deployment."
+---
+
+Every backend change goes through a GitHub Actions pipeline before it reaches a running environment. Pull requests trigger the quality gate (lint, type check, tests) without deploying anything. Merges to `staging` or `main` extend the pipeline with a Docker build, an ECR push, a database migration, and a rolling container deployment. The pipeline is designed so that a deployment to production is always preceded by the same set of quality gates that ran on the PR.
+
+## Trigger Strategy
+
+<Note>
+  Database migrations run as a separate one-off task **before** the new service containers are deployed. This ordering ensures that the database schema is compatible with the new code before any API traffic hits the updated containers. If the migration fails, the pipeline halts and the existing containers keep running on the old schema — no application downtime occurs.
+</Note>
+
+| Git Event | Environments Affected | Actions Run |
+|-----------|----------------------|-------------|
+| Pull request | None | Install → Lint → Type check → Tests |
+| Push to `staging` | Staging | All quality gates + Docker build + ECR push + Migrate + Deploy staging |
+| Push to `main` | Production | All quality gates + Docker build + ECR push + Migrate + Deploy production |
+
+## Pipeline Stages
+
+<Steps>
+  <Step title="Checkout Code">
+    The workflow checks out the repository at the triggering commit SHA. This SHA is captured as the Docker image tag to ensure full traceability between a running container and the exact code it was built from.
+
+    ```yaml
+    - uses: actions/checkout@v4
+    - name: Set image tag
+      run: echo "IMAGE_TAG=${GITHUB_SHA::8}" >> $GITHUB_ENV
+    ```
+  </Step>
+  <Step title="Install Dependencies">
+    Node.js 20 and pnpm are set up, and dependencies are restored from cache before installation. The `--frozen-lockfile` flag ensures the exact dependency tree recorded in `pnpm-lock.yaml` is used.
+
+    ```yaml
+    - uses: pnpm/action-setup@v3
+      with:
+        version: 9
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: pnpm
+    - run: pnpm install --frozen-lockfile
+    ```
+  </Step>
+  <Step title="Lint and Type Check">
+    ESLint runs across the entire `src/` tree and the TypeScript compiler verifies types without emitting output. Either failure stops the pipeline.
+
+    ```bash
+    pnpm lint
+    pnpm tsc --noEmit
+    ```
+  </Step>
+  <Step title="Run Unit and Integration Tests">
+    Vitest runs the full test suite. Integration tests connect to a PostgreSQL and Redis instance spun up as GitHub Actions service containers, ensuring real database behavior is tested in CI.
+
+    ```yaml
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: mosaic_test
+          POSTGRES_USER: mosaic
+          POSTGRES_PASSWORD: testpassword
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    ```
+
+    ```bash
+    pnpm test
+    ```
+  </Step>
+  <Step title="Build Docker Image">
+    The Docker image is built using the multi-stage `Dockerfile` in the repository root. The image is tagged with both the short Git SHA and `latest` for the target environment.
+
+    ```bash
+    docker build \
+      --tag $ECR_REGISTRY/mosaic-api:$IMAGE_TAG \
+      --tag $ECR_REGISTRY/mosaic-api:latest \
+      --file Dockerfile \
+      .
+    ```
+  </Step>
+  <Step title="Push Image to ECR">
+    The GitHub Actions runner authenticates with Amazon ECR using OIDC-based role assumption (no long-lived AWS credentials stored as secrets) and pushes both tags.
+
+    ```yaml
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::123456789012:role/mosaic-github-actions
+        aws-region: us-east-1
+
+    - uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Push image to ECR
+      run: |
+        docker push $ECR_REGISTRY/mosaic-api:$IMAGE_TAG
+        docker push $ECR_REGISTRY/mosaic-api:latest
+    ```
+  </Step>
+  <Step title="Run Database Migrations">
+    A one-off ECS task (or Kubernetes Job) runs `prisma migrate deploy` against the target environment's database before the service update. The pipeline waits for the task to exit successfully before proceeding.
+
+    ```bash
+    aws ecs run-task \
+      --cluster mosaic-production \
+      --task-definition mosaic-migrate \
+      --overrides '{"containerOverrides":[{"name":"mosaic-api","command":["npx","prisma","migrate","deploy"]}]}' \
+      --launch-type FARGATE \
+      --network-configuration "awsvpcConfiguration={subnets=[subnet-xxx],securityGroups=[sg-xxx],assignPublicIp=DISABLED}"
+    ```
+  </Step>
+  <Step title="Update ECS Service (or Apply K8s Manifest)">
+    The ECS service is updated to use the new task definition revision (pointing to the new image tag). ECS initiates a rolling replacement of all running tasks.
+
+    ```bash
+    # Register updated task definition
+    aws ecs register-task-definition \
+      --cli-input-json file://task-definition.json
+
+    # Update the service to use the new task definition
+    aws ecs update-service \
+      --cluster mosaic-production \
+      --service mosaic-api \
+      --task-definition mosaic-api
+    ```
+
+    For Kubernetes:
+
+    ```bash
+    kubectl set image deployment/mosaic-api \
+      mosaic-api=$ECR_REGISTRY/mosaic-api:$IMAGE_TAG \
+      --namespace production
+    ```
+  </Step>
+  <Step title="Wait for Deployment and Verify Health Check">
+    The pipeline waits for the ECS service to reach a stable state (all new tasks healthy, all old tasks stopped) before marking the deployment as successful. A failed health check causes the pipeline to fail and alerts the team.
+
+    ```bash
+    aws ecs wait services-stable \
+      --cluster mosaic-production \
+      --services mosaic-api
+
+    # Verify health endpoint on the new deployment
+    curl --fail https://api.mosaic.yourorg.com/health
+    ```
+  </Step>
+</Steps>
+
+## Full Workflow YAML
+
+```yaml
+name: Backend CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+  pull_request:
+    branches:
+      - main
+      - staging
+
+permissions:
+  id-token: write   # Required for OIDC AWS authentication
+  contents: read
+
+env:
+  ECR_REGISTRY: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: mosaic-api
+  AWS_REGION: us-east-1
+
+jobs:
+  quality:
+    name: Lint, Type Check, and Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: mosaic_test
+          POSTGRES_USER: mosaic
+          POSTGRES_PASSWORD: testpassword
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm tsc --noEmit
+
+      - name: Run tests
+        run: pnpm test
+        env:
+          DATABASE_URL: postgresql://mosaic:testpassword@localhost:5432/mosaic_test
+          REDIS_URL: redis://localhost:6379
+
+  build-and-deploy:
+    name: Build, Push, and Deploy
+    runs-on: ubuntu-latest
+    needs: quality
+    if: github.event_name == 'push'
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA::8}" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        run: |
+          docker build \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Run database migrations
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --task-definition mosaic-migrate \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.PRIVATE_SUBNET_IDS }}],securityGroups=[${{ secrets.ECS_SECURITY_GROUP }}],assignPublicIp=DISABLED}" \
+            --overrides '{"containerOverrides":[{"name":"mosaic-api","command":["npx","prisma","migrate","deploy"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster ${{ secrets.ECS_CLUSTER }} --tasks $TASK_ARN
+          EXIT_CODE=$(aws ecs describe-tasks --cluster ${{ secrets.ECS_CLUSTER }} --tasks $TASK_ARN \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          test "$EXIT_CODE" = "0"
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service mosaic-api \
+            --force-new-deployment
+
+      - name: Wait for stable deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --services mosaic-api
+
+      - name: Verify health endpoint
+        run: curl --fail ${{ secrets.API_BASE_URL }}/health
+```
+
+## Required Secrets
+
+Store the following in the GitHub repository's **Settings → Secrets and variables → Actions**, scoped to the appropriate environment:
+
+| Secret | Description |
+|--------|-------------|
+| `AWS_DEPLOY_ROLE_ARN` | IAM role ARN for OIDC-based AWS authentication |
+| `ECS_CLUSTER` | ECS cluster name (e.g., `mosaic-production`) |
+| `PRIVATE_SUBNET_IDS` | Comma-separated private subnet IDs for one-off tasks |
+| `ECS_SECURITY_GROUP` | Security group ID for ECS tasks |
+| `API_BASE_URL` | Backend API base URL for health check verification |
+
+## Rollback
+
+To roll back a production deployment, re-deploy the previous Docker image tag by updating the ECS service to point to the prior task definition revision:
+
+```bash
+# Find the previous task definition revision
+aws ecs describe-task-definition --task-definition mosaic-api --query 'taskDefinition.revision'
+
+# Update the service to the previous revision (e.g., revision 47)
+aws ecs update-service \
+  --cluster mosaic-production \
+  --service mosaic-api \
+  --task-definition mosaic-api:47
+```
+
+If the rollback involves a schema change, run a compensating migration manually before updating the service.

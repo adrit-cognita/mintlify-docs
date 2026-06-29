@@ -1,0 +1,133 @@
+---
+title: "Frontend Hosting: Static Deployment and CDN Configuration"
+sidebarTitle: "Frontend Hosting"
+description: "How the Mosaic Reporting frontend SPA is built, deployed to a static hosting platform, and served via CDN with proper caching and routing configuration."
+---
+
+The Mosaic Reporting frontend is a fully static single-page application built with Vite. At build time, Vite compiles all TypeScript, bundles React components, and emits a `dist/` directory containing a single `index.html` entry point and a set of content-hashed asset files. That directory is all that needs to be deployed — no server-side rendering, no Node.js process, no runtime environment.
+
+## Build Process
+
+The build is executed with a single command:
+
+```bash
+pnpm build
+```
+
+This runs `vite build` under the hood. Vite performs the following steps:
+
+1. Resolves all imports from `src/` and bundles them with Rollup.
+2. Applies tree-shaking to remove unused code.
+3. Emits JavaScript and CSS chunks with content-hash suffixes in their filenames (e.g., `assets/index-3f8a2c1d.js`).
+4. Copies static assets from `public/` to `dist/` unchanged.
+5. Writes `dist/index.html` with `<script>` and `<link>` tags pointing to the hashed chunk filenames.
+
+The resulting `dist/` directory is entirely self-contained and can be uploaded to any static hosting provider.
+
+### Production Build Environment Variables
+
+Vite exposes only variables prefixed with `VITE_` to the browser bundle. Set these in your hosting platform's environment settings before triggering a build:
+
+| Variable | Description |
+|----------|-------------|
+| `VITE_API_BASE_URL` | Absolute URL of the backend API (e.g. `https://api.mosaic.yourorg.com`) |
+| `VITE_SENTRY_DSN` | Sentry DSN for frontend error capture |
+| `VITE_DICOM_VIEWER_URL` | Base URL of the integrated DICOM viewer |
+| `VITE_APP_ENV` | Environment label (`development`, `staging`, `production`) |
+
+<Note>
+  Environment variables are baked into the JavaScript bundle at build time. A separate build artifact is produced for each environment. Never expose secrets (API keys, passwords) in `VITE_*` variables — anything prefixed `VITE_` is visible in the browser's network inspector.
+</Note>
+
+## Hosting Platform: Vercel
+
+Mosaic Reporting's frontend is deployed on Vercel. On every merge to the `main` branch, the GitHub Actions pipeline (or Vercel's native GitHub integration) triggers a new build and deploys it globally across Vercel's edge network.
+
+### Vercel Project Configuration
+
+Configure the following in the Vercel project dashboard (or in `vercel.json`):
+
+| Setting | Value |
+|---------|-------|
+| Framework Preset | Vite |
+| Build Command | `pnpm build` |
+| Output Directory | `dist` |
+| Install Command | `pnpm install --frozen-lockfile` |
+| Node.js Version | 20.x |
+
+### `vercel.json` Configuration
+
+The following `vercel.json` in the repository root provides the SPA catch-all routing rule, security headers, and cache-control overrides:
+
+```json
+{
+  "buildCommand": "pnpm build",
+  "outputDirectory": "dist",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/index.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache" },
+        { "key": "X-Frame-Options", "value": "SAMEORIGIN" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload" }
+      ]
+    },
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    }
+  ]
+}
+```
+
+## SPA Routing and the Catch-All Rule
+
+<Note>
+  Because Mosaic Reporting is a client-side SPA, all URL routing (e.g., `/worklist`, `/reports/123`, `/settings/profile`) is handled by React Router in the browser — not by the server. If a user navigates directly to `https://mosaic.yourorg.com/reports/123` or refreshes the page, the hosting platform must serve `index.html` for that path rather than returning a 404. This is called the **SPA catch-all rule**.
+
+  Vercel applies this automatically when you configure the `rewrites` block shown above. If you use AWS S3 + CloudFront instead, configure the CloudFront distribution's **custom error response** to redirect all 404s to `/index.html` with an HTTP 200 status code.
+</Note>
+
+## Alternative: AWS S3 + CloudFront
+
+If you deploy to S3 + CloudFront instead of Vercel, follow these steps after running `pnpm build`:
+
+```bash
+# Sync dist/ to the S3 bucket
+aws s3 sync dist/ s3://mosaic-frontend-prod/ \
+  --delete \
+  --cache-control "public, max-age=31536000, immutable" \
+  --exclude "index.html"
+
+# Upload index.html separately with no-cache
+aws s3 cp dist/index.html s3://mosaic-frontend-prod/index.html \
+  --cache-control "no-cache" \
+  --content-type "text/html"
+
+# Invalidate the CloudFront cache for index.html after each deploy
+aws cloudfront create-invalidation \
+  --distribution-id EXXXXXXXXXX \
+  --paths "/index.html"
+```
+
+Configure the CloudFront distribution's **default root object** as `index.html` and add a **custom error response** mapping 404 → `/index.html` (HTTP 200) to handle SPA routing.
+
+## Cache Strategy
+
+| Asset | Cache-Control | Rationale |
+|-------|--------------|-----------|
+| `index.html` | `no-cache` | Must always be re-validated so users receive the latest deploy immediately |
+| `/assets/*.js`, `/assets/*.css` | `public, max-age=31536000, immutable` | Content-hashed filenames change on every build; safe to cache permanently |
+| `/assets/images/*` | `public, max-age=86400` | Images change infrequently; 1-day TTL is a safe balance |
+| `/favicon.svg`, `/manifest.json` | `public, max-age=3600` | Rarely changed; short TTL avoids stale icon issues |
+
+## Custom Domain
+
+Configure your custom domain in the Vercel project's **Domains** settings panel. Vercel automatically provisions an SSL certificate via Let's Encrypt and routes traffic from `mosaic.yourorg.com` to the deployed edge network. Point your DNS CNAME record at `cname.vercel-dns.com` (or use Vercel nameservers for the zone).

@@ -1,0 +1,158 @@
+---
+title: "Report Editor: Structured Radiology Report Authoring"
+sidebarTitle: "Report Editor"
+description: "The Mosaic Reporting report editor provides structured, template-driven authoring for radiology reports with auto-save, versioning, and sign-off workflows."
+---
+
+The report editor is the core feature module of Mosaic Reporting. It renders a structured authoring interface driven by a report template, letting radiologists and residents compose findings, impressions, and measurements in a consistent, machine-readable format. Every report progresses through a defined lifecycle from first draft to final sign-off.
+
+## Component Hierarchy
+
+The editor is composed of a tree of focused components. Each layer is responsible for a single concern:
+
+```text
+<ReportEditorPage>          — route-level shell, loads report + template data
+  └── <ReportForm>          — form state, auto-save orchestration, keyboard shortcuts
+        └── <SectionGroup>  — renders a named template section (e.g. "Findings")
+              └── <ReportField>  — individual field: text, dropdown, radio, or measurement
+```
+
+You can import and reuse `<ReportField>` and `<SectionGroup>` independently if you need to render partial report previews elsewhere in the application.
+
+## Field Types
+
+The editor supports the following field types, each rendered as a distinct input control:
+
+| Field Type | Component behavior | Use case |
+|---|---|---|
+| `text` | Single-line Tiptap rich-text input | Short findings, labels |
+| `textarea` | Multi-line Tiptap rich-text input | Narrative findings, impressions |
+| `dropdown` | Select from a predefined option list | Laterality, contrast, technique |
+| `radio` | Single-choice from a small option set | Normal / abnormal flags |
+| `measurement` | Numeric input with unit selector | Lesion size, organ dimensions |
+
+## Report Authoring Workflow
+
+<Steps>
+  <Step title="Open a study from the worklist">
+    Clicking a study row in the worklist claims the study and navigates to `/reports/new?studyId=<id>`. If a draft already exists for this study, the existing draft is opened instead.
+  </Step>
+  <Step title="Select or confirm the report template">
+    The worklist auto-assigns a template based on modality and body part. You can switch templates at this point — note that switching after entering data will prompt a confirmation warning, as field content is not migrated between templates.
+  </Step>
+  <Step title="Author section fields">
+    Complete each section (e.g. Clinical History, Technique, Findings, Impression). Required fields are marked with an asterisk. Rich-text fields support basic formatting — bold, italic, and ordered/unordered lists.
+  </Step>
+  <Step title="Save draft">
+    The editor auto-saves every 30 seconds and on every field blur. You can also press **Ctrl+S** to save immediately. The report enters the `draft` state on first save.
+  </Step>
+  <Step title="Submit as preliminary">
+    Residents and technologists can submit a report as `preliminary` using the **Submit Preliminary** action. This makes the report visible to supervising radiologists for review.
+  </Step>
+  <Step title="Finalize and sign off">
+    Radiologists and admins can finalize the report using the **Finalize** action or pressing **Ctrl+Enter**. Finalization calls `POST /api/reports/:id/finalize` and transitions the report to `final` state. Amendments create an `amended` state copy.
+  </Step>
+</Steps>
+
+## Report States
+
+Reports move through a linear lifecycle. Once a report reaches `final`, it can only be changed via an amendment.
+
+```text
+draft  →  preliminary  →  final  →  amended
+```
+
+| State | Description | Who can set it |
+|---|---|---|
+| `draft` | Work in progress, not visible outside the editor | Any author |
+| `preliminary` | Submitted for radiologist review | `resident`, `technologist` |
+| `final` | Signed off — locked for editing | `radiologist`, `admin` |
+| `amended` | Correction to a finalized report | `radiologist`, `admin` |
+
+## Auto-Save
+
+The editor uses a React Query `useMutation` to persist draft changes. Auto-save fires on field blur and on a 30-second polling interval. A save indicator in the toolbar shows the last-saved timestamp.
+
+```tsx
+// src/features/report-editor/hooks/useAutoSave.ts
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+import { apiClient } from "@/lib/axiosClient";
+
+interface SavePayload {
+  reportId: string;
+  fields: Record<string, unknown>;
+}
+
+export function useAutoSave(reportId: string, fields: Record<string, unknown>) {
+  const queryClient = useQueryClient();
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const saveMutation = useMutation({
+    mutationFn: async (payload: SavePayload) => {
+      const { data } = await apiClient.patch(
+        `/api/reports/${payload.reportId}/draft`,
+        { fields: payload.fields }
+      );
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["report", reportId] });
+    },
+  });
+
+  // Trigger auto-save every 30 seconds
+  useEffect(() => {
+    intervalRef.current = setInterval(() => {
+      saveMutation.mutate({ reportId, fields });
+    }, 30_000);
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [reportId, fields]);
+
+  // Call this from field onBlur handlers
+  const saveNow = () => saveMutation.mutate({ reportId, fields });
+
+  return {
+    saveNow,
+    isSaving: saveMutation.isPending,
+    lastSavedAt: saveMutation.submittedAt,
+  };
+}
+```
+
+## Versioning
+
+Every call to `PATCH /api/reports/:id/draft` appends a version entry to the report's history. You can access the version history panel from the **History** button in the editor toolbar.
+
+Each version entry records:
+
+- Timestamp of the save
+- Author (`user.id` + display name)
+- A diff of changed fields relative to the previous version
+
+Versions are read-only — you can view them for audit purposes but cannot restore an older version as the current draft directly (contact an admin if a rollback is needed).
+
+## Sign-Off and Finalization
+
+Finalization is restricted to the `radiologist` and `admin` roles. Calling `finalizeReport()` performs a pre-flight validation check (all required fields must be non-empty) before submitting.
+
+```tsx
+// src/features/report-editor/actions/finalizeReport.ts
+import { apiClient } from "@/lib/axiosClient";
+
+export async function finalizeReport(reportId: string): Promise<void> {
+  await apiClient.post(`/api/reports/${reportId}/finalize`);
+}
+```
+
+If required fields are incomplete, the API returns a `422 Unprocessable Entity` with a list of field IDs that need attention. The editor highlights those fields in red and scrolls the first invalid field into view.
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+S` | Save draft immediately |
+| `Ctrl+Enter` | Finalize report (radiologist/admin only) |

@@ -1,0 +1,234 @@
+---
+title: "State Management: Zustand and React Query in Mosaic"
+sidebarTitle: "State Management"
+description: "How Mosaic Reporting manages client-side UI state with Zustand and server state with React Query, covering store structure and cache invalidation."
+---
+
+Mosaic Reporting uses a two-layer state model to keep UI logic and server data concerns cleanly separated. Zustand owns all ephemeral, client-side state — things like which study is selected or whether the sidebar is open — while React Query owns everything that originates from the server, handling fetching, caching, and synchronization automatically.
+
+## Two-Layer State Model
+
+| Layer | Library | Owns |
+|---|---|---|
+| UI / Local state | Zustand | Selected study, filters, editor draft, sidebar layout, toast queue |
+| Server / Remote state | React Query | Reports, worklist entries, templates, user profile |
+
+Keeping these layers separate means your components never have to manually coordinate fetch-then-set patterns. React Query fetches and caches; Zustand holds everything that has no server representation.
+
+## Zustand Stores
+
+Each feature module owns exactly one store. Stores are thin slices of state with collocated actions — no thunks, no sagas.
+
+| Store | File | Responsibilities |
+|---|---|---|
+| `useAuthStore` | `stores/authStore.ts` | Current user object, access token, refresh token, authentication status (`idle` / `authenticated` / `unauthenticated`) |
+| `useWorklistStore` | `stores/worklistStore.ts` | Active filter set, selected study ID, pagination cursor, column sort order |
+| `useReportStore` | `stores/reportStore.ts` | Current report draft, dirty flag, selected template ID, all editor field values |
+| `useUIStore` | `stores/uiStore.ts` | Sidebar open/closed, split-pane widths, active theme, toast notification queue |
+
+### Defining a Zustand Store
+
+Below is the full definition for `useReportStore`, showing the state shape, action signatures, and Immer-powered mutations.
+
+```ts
+// stores/reportStore.ts
+import { create } from 'zustand';
+import { immer } from 'zustand/middleware/immer';
+import type { ReportDraft, TemplateId } from '@/types';
+
+interface ReportState {
+  draft: ReportDraft | null;
+  isDirty: boolean;
+  selectedTemplateId: TemplateId | null;
+  fieldValues: Record<string, unknown>;
+
+  // Actions
+  setDraft: (draft: ReportDraft) => void;
+  updateField: (key: string, value: unknown) => void;
+  selectTemplate: (id: TemplateId) => void;
+  resetDraft: () => void;
+}
+
+export const useReportStore = create<ReportState>()(
+  immer((set) => ({
+    draft: null,
+    isDirty: false,
+    selectedTemplateId: null,
+    fieldValues: {},
+
+    setDraft: (draft) =>
+      set((state) => {
+        state.draft = draft;
+        state.isDirty = false;
+      }),
+
+    updateField: (key, value) =>
+      set((state) => {
+        state.fieldValues[key] = value;
+        state.isDirty = true;
+      }),
+
+    selectTemplate: (id) =>
+      set((state) => {
+        state.selectedTemplateId = id;
+      }),
+
+    resetDraft: () =>
+      set((state) => {
+        state.draft = null;
+        state.isDirty = false;
+        state.fieldValues = {};
+        state.selectedTemplateId = null;
+      }),
+  }))
+);
+```
+
+<Note>
+  Use the `immer` middleware for any store that mutates nested objects. Without it you must spread every level of the state tree manually, which becomes error-prone in `useReportStore` where `fieldValues` can be deeply nested.
+</Note>
+
+## React Query Usage
+
+Every API call in Mosaic goes through a React Query hook — `useQuery`, `useMutation`, or `useInfiniteQuery`. Components never import `apiClient` directly.
+
+### Cache Key Convention
+
+Consistent cache keys are critical for targeted invalidation. Follow this convention across all hooks:
+
+| Data type | Cache key shape | Example |
+|---|---|---|
+| Single report | `['reports', reportId]` | `['reports', 'rpt_abc123']` |
+| Worklist page | `['worklist', filters]` | `['worklist', { modality: 'CT', status: 'pending' }]` |
+| All templates | `['templates']` | `['templates']` |
+| Single template | `['templates', templateId]` | `['templates', 'tpl_xyz456']` |
+| Current user | `['me']` | `['me']` |
+
+### Defining a React Query Hook
+
+Keep all query/mutation logic in dedicated hooks under `hooks/api/`. Here is a complete example for report fetching and saving:
+
+```ts
+// hooks/api/useReport.ts
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { fetchReport, saveReport } from '@/api/reports';
+import type { ReportDraft } from '@/types';
+
+/** Fetch a single report by ID */
+export function useReport(reportId: string) {
+  return useQuery({
+    queryKey: ['reports', reportId],
+    queryFn: () => fetchReport(reportId),
+    staleTime: 30_000, // consider fresh for 30 s
+    enabled: Boolean(reportId),
+  });
+}
+
+/** Save (create or update) a report draft */
+export function useSaveReport() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (draft: ReportDraft) => saveReport(draft),
+    onSuccess: (savedReport) => {
+      // Update the specific report in the cache
+      queryClient.setQueryData(['reports', savedReport.id], savedReport);
+      // Invalidate the worklist so status badges refresh
+      queryClient.invalidateQueries({ queryKey: ['worklist'] });
+      // Invalidate the full report list if it exists
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+    },
+  });
+}
+```
+
+### Cache Invalidation
+
+After a report is created or updated, call `queryClient.invalidateQueries` so any stale worklist or report-list views refetch in the background:
+
+```ts
+// Called inside a mutation's onSuccess callback
+queryClient.invalidateQueries({ queryKey: ['reports'] });
+```
+
+React Query marks the matching queries as stale and immediately refetches them if they have active subscribers. Queries without subscribers refetch the next time a component mounts.
+
+### Optimistic Updates
+
+The worklist **claim** action uses an optimistic update so the UI responds instantly before the server confirms:
+
+```ts
+// hooks/api/useClaimStudy.ts
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { claimStudy } from '@/api/worklist';
+
+export function useClaimStudy() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ studyId, userId }: { studyId: string; userId: string }) =>
+      claimStudy(studyId, userId),
+
+    onMutate: async ({ studyId, userId }) => {
+      // Cancel any outgoing refetches to avoid overwriting our optimistic update
+      await queryClient.cancelQueries({ queryKey: ['worklist'] });
+
+      // Snapshot the previous value for rollback
+      const previous = queryClient.getQueryData(['worklist']);
+
+      // Optimistically mark the study as claimed
+      queryClient.setQueryData(['worklist'], (old: any) =>
+        old?.map((study: any) =>
+          study.id === studyId ? { ...study, claimedBy: userId } : study
+        )
+      );
+
+      return { previous };
+    },
+
+    onError: (_err, _vars, context) => {
+      // Roll back to the snapshot on failure
+      if (context?.previous) {
+        queryClient.setQueryData(['worklist'], context.previous);
+      }
+    },
+
+    onSettled: () => {
+      // Always refetch after error or success to sync with the server
+      queryClient.invalidateQueries({ queryKey: ['worklist'] });
+    },
+  });
+}
+```
+
+## Connecting the Two Layers
+
+Zustand and React Query are kept independent — neither imports from the other. Communication happens at the component level:
+
+```tsx
+// ReportEditor.tsx
+import { useReport, useSaveReport } from '@/hooks/api/useReport';
+import { useReportStore } from '@/stores/reportStore';
+
+export function ReportEditor({ reportId }: { reportId: string }) {
+  const { data: report, isLoading } = useReport(reportId);
+  const { mutate: saveReport, isPending } = useSaveReport();
+
+  const { fieldValues, isDirty, updateField, setDraft } = useReportStore();
+
+  // Seed Zustand draft from the server response
+  useEffect(() => {
+    if (report) setDraft(report);
+  }, [report, setDraft]);
+
+  const handleSave = () => {
+    saveReport({ ...report, fields: fieldValues });
+  };
+
+  // ...
+}
+```
+
+<Warning>
+  Do not store server data (reports, worklist entries, templates) in Zustand. If you find yourself copying a React Query result into a Zustand store and keeping them in sync, that is a sign the data belongs exclusively in the React Query cache.
+</Warning>

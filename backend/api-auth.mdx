@@ -1,0 +1,251 @@
+---
+title: "Auth API Endpoints: Login, Logout, and Token Refresh"
+sidebarTitle: "Auth Endpoints"
+description: "REST API reference for Mosaic Reporting authentication: POST /auth/login, POST /auth/logout, POST /auth/refresh, and GET /auth/me endpoints."
+---
+
+The authentication endpoints manage session lifecycle for Mosaic Reporting. You receive a short-lived JWT access token on login, which you supply as a Bearer token on every subsequent request. A long-lived refresh token is stored in an HttpOnly cookie and used to silently renew the access token without requiring the user to re-enter credentials.
+
+---
+
+## POST /api/v1/auth/login
+
+Authenticates a user with their email and password. Returns a JWT access token and the user's profile. A refresh token is set as an HttpOnly cookie on the response — you do not need to handle this manually in browser clients.
+
+### Request Body
+
+<ParamField body="email" type="string" required>
+  The user's registered email address.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The user's password in plaintext. Transmitted over HTTPS; never logged.
+</ParamField>
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">
+  Always `true` on a successful response.
+</ResponseField>
+
+<ResponseField name="data" type="object">
+  <Expandable title="data">
+    <ResponseField name="accessToken" type="string">
+      A signed JWT access token. Valid for 15 minutes. Include this in the `Authorization: Bearer` header on all subsequent requests.
+    </ResponseField>
+    <ResponseField name="user" type="object">
+      <Expandable title="user">
+        <ResponseField name="id" type="string">
+          Unique user identifier (CUID).
+        </ResponseField>
+        <ResponseField name="email" type="string">
+          The user's email address.
+        </ResponseField>
+        <ResponseField name="name" type="string">
+          The user's display name.
+        </ResponseField>
+        <ResponseField name="role" type="string">
+          The user's role: `ADMIN`, `RADIOLOGIST`, `TECHNOLOGIST`, or `VIEWER`.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Response — 401 Unauthorized
+
+Returns `AUTH_INVALID_CREDENTIALS` when the email does not exist or the password is incorrect. The response intentionally does not distinguish between the two cases.
+
+<CodeGroup>
+
+```bash Request
+curl -X POST https://api.mosaic.internal/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "dr.smith@hospital.org",
+    "password": "s3cur3P@ssw0rd"
+  }'
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGlkMTIzIiwicm9sZSI6IlJBRElPTE9HSVNUIiwiaWF0IjoxNzE4NDU2MDAwLCJleHAiOjE3MTg0NTY5MDB9.abc123sig",
+    "user": {
+      "id": "clid123abc",
+      "email": "dr.smith@hospital.org",
+      "name": "Dr. Sarah Smith",
+      "role": "RADIOLOGIST"
+    }
+  }
+}
+```
+
+```json Response 401
+{
+  "success": false,
+  "error": {
+    "code": "AUTH_INVALID_CREDENTIALS",
+    "message": "Invalid email or password.",
+    "statusCode": 401
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/v1/auth/logout
+
+Logs out the currently authenticated user by revoking the refresh token stored in the HttpOnly cookie and deleting the session entry from Redis. Subsequent calls using the same refresh token will fail with `AUTH_TOKEN_EXPIRED`.
+
+### Request Headers
+
+| Header | Value |
+|---|---|
+| `Authorization` | `Bearer <access_token>` |
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">
+  Always `true` when the logout succeeds.
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl -X POST https://api.mosaic.internal/api/v1/auth/logout \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9..."
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": null
+}
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/v1/auth/refresh
+
+Issues a new access token using the refresh token stored in the HttpOnly cookie. You do not need to send any body. The refresh token is automatically read from the `refresh_token` cookie on the request. If the refresh token is missing, invalid, or expired, the response is a `401`.
+
+Call this endpoint when you receive a `401 AUTH_TOKEN_EXPIRED` on any other endpoint, or proactively before the access token expires.
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">
+  Always `true` on a successful token refresh.
+</ResponseField>
+
+<ResponseField name="data" type="object">
+  <Expandable title="data">
+    <ResponseField name="accessToken" type="string">
+      A new signed JWT access token, valid for 15 minutes.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Response — 401 Unauthorized
+
+Returns `AUTH_TOKEN_EXPIRED` when the refresh token is expired or has been revoked (e.g., after a logout). The user must re-authenticate via `/auth/login`.
+
+<CodeGroup>
+
+```bash Request
+curl -X POST https://api.mosaic.internal/api/v1/auth/refresh \
+  --cookie "refresh_token=<refresh_token_value>"
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGlkMTIzIiwicm9sZSI6IlJBRElPTE9HSVNUIiwiaWF0IjoxNzE4NDU3MDAwLCJleHAiOjE3MTg0NTc5MDB9.newSig456"
+  }
+}
+```
+
+```json Response 401
+{
+  "success": false,
+  "error": {
+    "code": "AUTH_TOKEN_EXPIRED",
+    "message": "Refresh token has expired. Please log in again.",
+    "statusCode": 401
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## GET /api/v1/auth/me
+
+Returns the full profile of the currently authenticated user. Use this endpoint on application startup to hydrate the user session in your frontend state.
+
+### Request Headers
+
+| Header | Value |
+|---|---|
+| `Authorization` | `Bearer <access_token>` |
+
+### Response — 200 OK
+
+<ResponseField name="success" type="boolean">
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="data" type="object">
+  <Expandable title="data">
+    <ResponseField name="user" type="object">
+      <Expandable title="user">
+        <ResponseField name="id" type="string">
+          Unique user identifier (CUID).
+        </ResponseField>
+        <ResponseField name="email" type="string">
+          The user's registered email address.
+        </ResponseField>
+        <ResponseField name="name" type="string">
+          The user's display name.
+        </ResponseField>
+        <ResponseField name="role" type="string">
+          The user's role: `ADMIN`, `RADIOLOGIST`, `TECHNOLOGIST`, or `VIEWER`.
+        </ResponseField>
+        <ResponseField name="createdAt" type="string">
+          ISO 8601 timestamp of when the account was created.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<CodeGroup>
+
+```bash Request
+curl https://api.mosaic.internal/api/v1/auth/me \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9..."
+```
+
+```json Response 200
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "clid123abc",
+      "email": "dr.smith@hospital.org",
+      "name": "Dr. Sarah Smith",
+      "role": "RADIOLOGIST",
+      "createdAt": "2024-01-10T08:30:00.000Z"
+    }
+  }
+}
+```
+
+</CodeGroup>
